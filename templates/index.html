@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TalBot Chess</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600&family=Roboto:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header>
+      <h1>TalBot</h1>
+      <p>
+        Challenge an attacking chess engine that prizes initiative, mobility, and sacrifices in the
+        style of Mikhail Tal.
+      </p>
+    </header>
+
+    <main>
+      <section class="board-container">
+        <div id="board" class="board"></div>
+        <div class="board-overlay" id="board-overlay"></div>
+      </section>
+      <section class="sidebar">
+        <div class="controls">
+          <button id="new-game">New Game</button>
+          <div class="status" id="status">Initializing...</div>
+        </div>
+        <div class="move-log">
+          <h2>Moves</h2>
+          <ol id="move-list"></ol>
+        </div>
+        <div class="engine-notes">
+          <h2>About TalBot</h2>
+          <p>
+            TalBot searches aggressively and is rewarded for sacrificing material when it senses king
+            pressure. Expect speculative attacks, open lines, and tactical fireworks around the black
+            king.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Start a new game or click any white piece to begin your attack. Moves are communicated using
+        the Universal Chess Interface (UCI) format under the hood.
+      </p>
+    </footer>
+
+    <script src="/static/main.js" defer></script>
+  </body>
+</html>
