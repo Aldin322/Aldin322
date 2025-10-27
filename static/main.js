@@ -73,7 +73,11 @@ function renderBoard(fen) {
     const piece = boardPositions[square];
     element.textContent = piece ? PIECE_TO_UNICODE[piece] : '';
     element.dataset.piece = piece || '';
-    element.classList.remove('selected', 'destination');
+    element.classList.remove('selected', 'destination', 'white-piece', 'black-piece');
+    if (piece) {
+      const isWhite = piece === piece.toUpperCase();
+      element.classList.add(isWhite ? 'white-piece' : 'black-piece');
+    }
   }
   selectedSquare = null;
 }

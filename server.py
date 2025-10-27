@@ -101,7 +101,13 @@ app.add_middleware(
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-tal_engine = TalBotEngine()
+tal_engine = TalBotEngine(
+    max_depth=7,
+    time_limit=5.5,
+    sacrifice_bias=10.0,
+    attack_weight=7.5,
+    mobility_weight=2.5,
+)
 _games: Dict[str, chess.Board] = {}
 
 

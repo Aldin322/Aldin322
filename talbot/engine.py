@@ -10,6 +10,11 @@ import chess
 
 
 MATE_VALUE = 100_000
+BISHOP_PAIR_BONUS = 45
+ROOK_OPEN_FILE_BONUS = 22
+ROOK_SEMI_OPEN_FILE_BONUS = 12
+PASSED_PAWN_BASE = 35
+PASSED_PAWN_SCALE = 12
 
 
 PIECE_VALUES = {
@@ -147,11 +152,11 @@ class TalBotEngine:
 
     def __init__(
         self,
-        max_depth: int = 4,
-        time_limit: float = 2.5,
-        sacrifice_bias: float = 12.0,
-        attack_weight: float = 6.0,
-        mobility_weight: float = 2.0,
+        max_depth: int = 6,
+        time_limit: float = 4.5,
+        sacrifice_bias: float = 10.0,
+        attack_weight: float = 7.5,
+        mobility_weight: float = 2.5,
     ) -> None:
         self.max_depth = max_depth
         self.time_limit = time_limit
@@ -176,7 +181,7 @@ class TalBotEngine:
         state = SearchState(start_time=time.time(), time_limit=limit)
         best_move: Optional[chess.Move] = None
         best_value = -math.inf
-        aspiration_window = 50
+        aspiration_window = 75
 
         for depth in range(1, depth_limit + 1):
             if state.time_up():
@@ -261,7 +266,7 @@ class TalBotEngine:
         if state.time_up():
             return 0
 
-        key = board.fen()
+        key = board.zobrist_hash()
         entry = state.transposition_table.get(key)
         if entry and entry.depth >= depth:
             if entry.flag == "exact":
@@ -274,6 +279,10 @@ class TalBotEngine:
                 return entry.value
 
         alpha_orig = alpha
+        in_check = board.is_check()
+
+        if in_check:
+            depth += 1
 
         if depth == 0:
             return self._quiescence(board, alpha, beta, state, ply)
@@ -285,6 +294,13 @@ class TalBotEngine:
 
         state.nodes += 1
 
+        if depth >= 3 and self._can_null_move(board):
+            board.push(chess.Move.null())
+            null_score = -self._negamax(board, depth - 1 - 2, -beta, -beta + 1, state, ply + 1)
+            board.pop()
+            if null_score >= beta:
+                return beta
+
         hash_move = entry.move if entry else None
         moves = self._order_moves(board, depth=ply, hash_move=hash_move, state=state)
         if not moves:
@@ -295,11 +311,40 @@ class TalBotEngine:
         best_value = -MATE_VALUE
         best_move = None
 
-        for move in moves:
+        for index, move in enumerate(moves):
             if state.time_up():
                 break
+            is_capture = board.is_capture(move)
+            gives_check = board.gives_check(move)
             board.push(move)
-            score = -self._negamax(board, depth - 1, -beta, -alpha, state, ply + 1)
+
+            extension = 1 if gives_check else 0
+            new_depth = max(0, depth - 1 + extension)
+
+            reduction = 0
+            if (
+                new_depth > 0
+                and depth >= 3
+                and index >= 3
+                and not is_capture
+                and not gives_check
+                and move.promotion is None
+            ):
+                reduction = 1 + (1 if index > 6 else 0)
+
+            if index > 0:
+                score = -self._negamax(
+                    board,
+                    max(0, new_depth - reduction),
+                    -alpha - 1,
+                    -alpha,
+                    state,
+                    ply + 1,
+                )
+                if score > alpha:
+                    score = -self._negamax(board, new_depth, -beta, -alpha, state, ply + 1)
+            else:
+                score = -self._negamax(board, new_depth, -beta, -alpha, state, ply + 1)
             board.pop()
 
             if state.time_up():
@@ -310,6 +355,8 @@ class TalBotEngine:
                 best_move = move
             if score > alpha:
                 alpha = score
+                if not is_capture:
+                    self._update_history(move, depth)
             if alpha >= beta:
                 if not board.is_capture(move):
                     self._store_killer(state, ply, move)
@@ -376,7 +423,10 @@ class TalBotEngine:
                     value += 10 * PIECE_VALUES[victim.piece_type]
                 if attacker:
                     value -= PIECE_VALUES[attacker.piece_type]
-                return 5_000 + value
+                see_value = board.see(move)
+                return 5_000 + value + see_value
+            if board.gives_check(move):
+                return 3_000
             killers = state.killer_moves.get(depth, [])
             if move in killers:
                 return 2_000
@@ -432,9 +482,26 @@ class TalBotEngine:
             attack_white=attack_pressure_white,
             attack_black=attack_pressure_black,
         )
+        king_safety = self._king_safety(board)
+        passed_pawns = self._passed_pawn_score(board)
+        bishop_pair = self._bishop_pair_bonus(board)
+        rook_activity = self._rook_activity(board)
+        space = self._space_score(board)
         tempo = 10 if board.turn == chess.WHITE else -10
 
-        score = material + pst + mobility + attack_pressure + sacrifice + tempo
+        score = (
+            material
+            + pst
+            + mobility
+            + attack_pressure
+            + sacrifice
+            + king_safety
+            + passed_pawns
+            + bishop_pair
+            + rook_activity
+            + space
+            + tempo
+        )
         return score if board.turn == chess.WHITE else -score
 
     def _material_score(self, board: chess.Board) -> int:
@@ -478,6 +545,28 @@ class TalBotEngine:
         board.turn = turn
         return self.mobility_weight * (white_moves - black_moves)
 
+    def _king_safety(self, board: chess.Board) -> int:
+        score = 0
+        for color in (chess.WHITE, chess.BLACK):
+            king_square = board.king(color)
+            if king_square is None:
+                continue
+            enemy = not color
+            king_ring = chess.SquareSet(
+                chess.BB_KING_ATTACKS[king_square] | chess.BB_SQUARES[king_square]
+            )
+            friendly_pawns = 0
+            enemy_pressure = 0
+            for square in king_ring:
+                piece = board.piece_at(square)
+                if piece and piece.color == color and piece.piece_type == chess.PAWN:
+                    friendly_pawns += 1
+                enemy_pressure += len(board.attackers(enemy, square))
+            open_files = self._open_files_near_king(board, king_square, color)
+            contribution = 16 * friendly_pawns - 22 * enemy_pressure - 12 * open_files
+            score += contribution if color == chess.WHITE else -contribution
+        return score
+
     def _king_pressure(self, board: chess.Board, color: chess.Color) -> int:
         enemy = not color
         king_square = board.king(enemy)
@@ -505,12 +594,13 @@ class TalBotEngine:
         attack_diff = attack_white - attack_black
         # Reward dynamic imbalance that favours attacks.
         base = -self.sacrifice_bias * material_diff
-        attack_factor = int(1.5 * attack_diff)
+        attack_factor = int(1.7 * attack_diff)
         if material_diff < 0:
-            base += int(0.4 * (-material_diff) * (attack_white + 1))
+            base += int(0.45 * (-material_diff) * (attack_white + 2))
         elif material_diff > 0:
-            base -= int(0.3 * material_diff * (attack_black + 1))
-        return base + attack_factor
+            base -= int(0.35 * material_diff * (attack_black + 2))
+        initiative = 30 if board.turn == chess.WHITE else -30
+        return base + attack_factor + initiative
 
     def _game_phase(self, board: chess.Board) -> float:
         phase_weights = {
@@ -528,3 +618,91 @@ class TalBotEngine:
             )
         phase = remaining / total if total else 1.0
         return min(1.0, max(0.0, phase))
+
+    def _passed_pawn_score(self, board: chess.Board) -> int:
+        score = 0
+        for color in (chess.WHITE, chess.BLACK):
+            pawns = board.pieces(chess.PAWN, color)
+            for square in pawns:
+                if self._is_passed_pawn(board, square, color):
+                    rank = chess.square_rank(square) if color == chess.WHITE else 7 - chess.square_rank(square)
+                    bonus = PASSED_PAWN_BASE + PASSED_PAWN_SCALE * rank
+                    score += bonus if color == chess.WHITE else -bonus
+        return score
+
+    def _is_passed_pawn(self, board: chess.Board, square: chess.Square, color: chess.Color) -> bool:
+        file = chess.square_file(square)
+        rank = chess.square_rank(square)
+        if color == chess.WHITE:
+            ranks = range(rank + 1, 8)
+        else:
+            ranks = range(rank - 1, -1, -1)
+        for r in ranks:
+            for f in range(max(0, file - 1), min(7, file + 1) + 1):
+                opponent_square = chess.square(f, r)
+                piece = board.piece_at(opponent_square)
+                if piece and piece.color != color and piece.piece_type == chess.PAWN:
+                    return False
+        return True
+
+    def _bishop_pair_bonus(self, board: chess.Board) -> int:
+        score = 0
+        if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+            score += BISHOP_PAIR_BONUS
+        if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+            score -= BISHOP_PAIR_BONUS
+        return score
+
+    def _rook_activity(self, board: chess.Board) -> int:
+        score = 0
+        white_pawns = board.pieces(chess.PAWN, chess.WHITE)
+        black_pawns = board.pieces(chess.PAWN, chess.BLACK)
+        for color in (chess.WHITE, chess.BLACK):
+            rooks = board.pieces(chess.ROOK, color)
+            for square in rooks:
+                file_mask = chess.BB_FILES[chess.square_file(square)]
+                friendly_pawns = white_pawns if color == chess.WHITE else black_pawns
+                enemy_pawns = black_pawns if color == chess.WHITE else white_pawns
+                has_friendly = bool(friendly_pawns & file_mask)
+                has_enemy = bool(enemy_pawns & file_mask)
+                if not has_friendly and not has_enemy:
+                    bonus = ROOK_OPEN_FILE_BONUS
+                elif not has_friendly and has_enemy:
+                    bonus = ROOK_SEMI_OPEN_FILE_BONUS
+                else:
+                    bonus = 0
+                score += bonus if color == chess.WHITE else -bonus
+        return score
+
+    def _space_score(self, board: chess.Board) -> int:
+        white_space = 0
+        black_space = 0
+        for square in chess.SQUARES:
+            rank = chess.square_rank(square)
+            if rank >= 3:
+                if not board.piece_at(square) and board.attackers(chess.WHITE, square):
+                    white_space += 1
+            if rank <= 4:
+                if not board.piece_at(square) and board.attackers(chess.BLACK, square):
+                    black_space += 1
+        return 4 * (white_space - black_space)
+
+    def _open_files_near_king(
+        self, board: chess.Board, king_square: chess.Square, color: chess.Color
+    ) -> int:
+        file_index = chess.square_file(king_square)
+        pawns = board.pieces(chess.PAWN, color)
+        open_files = 0
+        for file in range(max(0, file_index - 1), min(7, file_index + 1) + 1):
+            file_mask = chess.BB_FILES[file]
+            if not pawns & file_mask:
+                open_files += 1
+        return open_files
+
+    def _can_null_move(self, board: chess.Board) -> bool:
+        if board.is_check():
+            return False
+        if board.halfmove_clock >= 90:
+            return False
+        material = self._material_total(board, board.turn)
+        return material > 600
