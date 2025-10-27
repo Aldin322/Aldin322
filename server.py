@@ -1,10 +1,15 @@
 """FastAPI server exposing the Tal-inspired chess bot."""
 from __future__ import annotations
 
+import errno
+import os
+import socket
 import uuid
+from contextlib import closing
 from typing import Dict, List, Optional
 
 import chess
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
@@ -156,3 +161,51 @@ async def play_move(move: MoveRequest) -> GameState:
         board.push(engine_move)
 
     return serialize_state(move.game_id, board)
+
+
+def _is_port_available(host: str, port: int) -> bool:
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return False
+            raise
+    return True
+
+
+def _choose_port(host: str, preferred_port: int, attempts: int = 20) -> int:
+    port = preferred_port
+    for _ in range(attempts):
+        if _is_port_available(host, port):
+            return port
+        port += 1
+    raise RuntimeError(
+        f"Unable to find an open port in range {preferred_port}-{port - 1}."
+    )
+
+
+def main() -> None:
+    host = os.getenv("HOST", "0.0.0.0")
+    reload_enabled = os.getenv("RELOAD", "false").lower() in {"1", "true", "yes"}
+    base_port = int(os.getenv("PORT", "8000"))
+    try:
+        port = _choose_port(host, base_port)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if port != base_port:
+        print(f"Port {base_port} unavailable; using {port} instead.")
+
+    uvicorn.run(
+        "server:app",
+        host=host,
+        port=port,
+        reload=reload_enabled,
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    main()

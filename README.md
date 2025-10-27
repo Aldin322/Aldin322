@@ -27,8 +27,12 @@ for playing against it online.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
+python server.py
 ```
 
-Then open http://localhost:8000 to challenge TalBot as White. Moves are submitted automatically by
-clicking source and destination squares; the engine responds immediately as Black.
+The helper script will honour optional environment variables such as `PORT`, `HOST`, and `RELOAD`.
+If the requested port is busy, TalBot will automatically scan for the next available port and log the
+chosen value, preventing the "Address already in use" crash seen when reloading uvicorn manually.
+
+Then open the reported address (default `http://localhost:8000`) to challenge TalBot as White. Moves are
+submitted automatically by clicking source and destination squares; the engine responds immediately as Black.
