@@ -114,6 +114,31 @@ PIECE_SQUARE_TABLES = {
 }
 
 
+def _board_hash(board: chess.Board) -> int:
+    """Return a transposition key that works across python-chess versions."""
+
+    for attr in ("zobrist_hash", "transposition_key", "_transposition_key"):
+        method = getattr(board, attr, None)
+        if callable(method):
+            return method()
+    # Fallback for very old versions: hash the full FEN string.
+    return hash(board.fen())
+
+
+def _static_exchange(board: chess.Board, move: chess.Move) -> int:
+    """Cross-version wrapper around python-chess static exchange evaluation."""
+
+    see = getattr(board, "see", None)
+    if callable(see):
+        return see(move)
+
+    victim = board.piece_at(move.to_square)
+    attacker = board.piece_at(move.from_square)
+    victim_value = PIECE_VALUES.get(victim.piece_type, 0) if victim else 0
+    attacker_value = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
+    return victim_value - attacker_value
+
+
 @dataclass
 class TTEntry:
     depth: int
@@ -266,7 +291,7 @@ class TalBotEngine:
         if state.time_up():
             return 0
 
-        key = board.zobrist_hash()
+        key = _board_hash(board)
         entry = state.transposition_table.get(key)
         if entry and entry.depth >= depth:
             if entry.flag == "exact":
@@ -319,7 +344,11 @@ class TalBotEngine:
             board.push(move)
 
             extension = 1 if gives_check else 0
-            new_depth = max(0, depth - 1 + extension)
+            new_depth = depth - 1 + extension
+            if new_depth >= depth:
+                new_depth = depth - 1
+            if new_depth < 0:
+                new_depth = 0
 
             reduction = 0
             if (
@@ -423,7 +452,7 @@ class TalBotEngine:
                     value += 10 * PIECE_VALUES[victim.piece_type]
                 if attacker:
                     value -= PIECE_VALUES[attacker.piece_type]
-                see_value = board.see(move)
+                see_value = _static_exchange(board, move)
                 return 5_000 + value + see_value
             if board.gives_check(move):
                 return 3_000
