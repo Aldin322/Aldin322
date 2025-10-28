@@ -149,7 +149,7 @@ class TTEntry:
     value: int
     flag: str
     move: Optional[chess.Move]
-    ply: int
+    generation: int
 
 
 @dataclass
@@ -161,6 +161,7 @@ class SearchState:
     history: Dict[Tuple[int, int], int] = field(default_factory=dict)
     nodes: int = 0
     stop: bool = False
+    generation: int = 0
 
     def time_exceeded(self) -> bool:
         if self.stop:
@@ -329,6 +330,44 @@ class TalBotEngine:
         self.max_sacrifice_extensions = max(0, max_sacrifice_extensions)
         self.neural_evaluator = NeuralEvaluator()
 
+    def _age_transposition(self, state: SearchState) -> None:
+        """Drop stale transposition entries so the table stays relevant."""
+
+        if not state.transposition:
+            return
+        max_age = 4
+        stale_keys = [
+            key
+            for key, entry in state.transposition.items()
+            if state.generation - entry.generation > max_age
+        ]
+        for key in stale_keys:
+            state.transposition.pop(key, None)
+
+    def _store_transposition(
+        self,
+        key: int,
+        entry: TTEntry,
+        state: SearchState,
+    ) -> None:
+        existing = state.transposition.get(key)
+        if existing is None:
+            state.transposition[key] = entry
+            return
+        if entry.depth > existing.depth:
+            state.transposition[key] = entry
+            return
+        if entry.depth == existing.depth and entry.generation >= existing.generation:
+            state.transposition[key] = entry
+
+    def _fetch_transposition(self, key: int, state: SearchState) -> Optional[TTEntry]:
+        entry = state.transposition.get(key)
+        if entry is None:
+            return None
+        if state.generation - entry.generation > 5:
+            return None
+        return entry
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -349,6 +388,8 @@ class TalBotEngine:
         aspiration = 50
 
         for depth in range(1, depth_cap + 1):
+            state.generation = depth
+            self._age_transposition(state)
             if state.time_exceeded():
                 break
 
@@ -405,7 +446,7 @@ class TalBotEngine:
         best_move: Optional[chess.Move] = None
 
         key = self._hash(board)
-        tt_entry = state.transposition.get(key)
+        tt_entry = self._fetch_transposition(key, state)
         hash_move = pv_hint or (tt_entry.move if tt_entry else None)
         moves = self._order_moves(board, 0, hash_move, state)
 
@@ -433,7 +474,11 @@ class TalBotEngine:
                 break
 
         if best_move is not None:
-            state.transposition[key] = TTEntry(depth, best_value, "exact", best_move, 0)
+            self._store_transposition(
+                key,
+                TTEntry(depth, best_value, "exact", best_move, state.generation),
+                state,
+            )
         return best_value, best_move
 
     def _pv_search(
@@ -452,8 +497,18 @@ class TalBotEngine:
         if ply >= MAX_PLY:
             return self._evaluate(board)
 
+        alpha = max(alpha, -MATE_SCORE + ply)
+        beta = min(beta, MATE_SCORE - ply)
+        if alpha >= beta:
+            return alpha
+
+        if board.is_fivefold_repetition() or board.is_repetition(3):
+            return 0
+        if board.can_claim_draw() and not board.is_check():
+            return 0
+
         key = self._hash(board)
-        entry = state.transposition.get(key)
+        entry = self._fetch_transposition(key, state)
         if entry and entry.depth >= depth:
             if entry.flag == "exact":
                 return entry.value
@@ -483,6 +538,27 @@ class TalBotEngine:
         if depth <= 3 and not in_check:
             static_eval_parent = self._evaluate(board)
 
+        tt_move = entry.move if entry else None
+        if (
+            depth >= 4
+            and tt_move is None
+            and not in_check
+            and not state.time_exceeded()
+        ):
+            self._pv_search(
+                board,
+                depth - 2,
+                alpha,
+                beta,
+                state,
+                ply,
+                check_extensions,
+                sacrifice_extensions,
+            )
+            refreshed = self._fetch_transposition(key, state)
+            if refreshed:
+                tt_move = refreshed.move
+
         # Null move pruning
         if depth >= 3 and not in_check and self._can_null_move(board):
             board.push(chess.Move.null())
@@ -500,7 +576,6 @@ class TalBotEngine:
             if null_score >= beta:
                 return beta
 
-        tt_move = entry.move if entry else None
         moves = self._order_moves(board, ply, tt_move, state)
         if not moves:
             if in_check:
@@ -626,6 +701,14 @@ class TalBotEngine:
                 alpha = score
                 if not is_capture:
                     self._update_history(move, depth, state)
+            elif not is_capture:
+                key_hist = (move.from_square, move.to_square)
+                penalty = depth * depth
+                new_score = state.history.get(key_hist, 0) - penalty
+                if new_score <= 0:
+                    state.history.pop(key_hist, None)
+                else:
+                    state.history[key_hist] = new_score
             if alpha >= beta:
                 if not is_capture:
                     self._store_killer(move, ply, state)
@@ -641,7 +724,11 @@ class TalBotEngine:
         elif best_value >= beta:
             flag = "lower"
 
-        state.transposition[key] = TTEntry(depth, best_value, flag, best_move, ply)
+        self._store_transposition(
+            key,
+            TTEntry(depth, best_value, flag, best_move, state.generation),
+            state,
+        )
         return best_value
 
     def _quiescence(
@@ -654,6 +741,10 @@ class TalBotEngine:
     ) -> int:
         if ply >= MAX_PLY:
             return self._evaluate(board)
+        if board.is_fivefold_repetition() or board.is_repetition(3):
+            return 0
+        if board.can_claim_draw() and not board.is_check():
+            return 0
         stand_pat = self._evaluate(board)
         if stand_pat >= beta:
             return beta
