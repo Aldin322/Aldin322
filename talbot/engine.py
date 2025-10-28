@@ -13,10 +13,6 @@ MATE_SCORE = 1_000_000
 MATE_THRESHOLD = MATE_SCORE - 1_000
 MAX_PLY = 128
 
-WHITE_ENEMY_HALF = chess.BB_RANK_5 | chess.BB_RANK_6 | chess.BB_RANK_7 | chess.BB_RANK_8
-BLACK_ENEMY_HALF = chess.BB_RANK_1 | chess.BB_RANK_2 | chess.BB_RANK_3 | chess.BB_RANK_4
-KING_SHELTER_WEIGHTS = (3, 2, 1)
-
 try:
     popcount = chess.popcount
 except AttributeError:  # pragma: no cover - compatibility path
@@ -199,11 +195,6 @@ class NeuralEvaluator:
         "phase",
         "sacrifice",
         "initiative",
-        "space",
-        "storm",
-        "shelter_delta",
-        "shelter_white",
-        "shelter_black",
     ]
 
     def __init__(self) -> None:
@@ -211,22 +202,22 @@ class NeuralEvaluator:
 
         # Hidden layers emphasise different combinations of features.
         self.layer1: List[Tuple[List[float], float]] = [
-            (self._row(material=3.2, pst=1.4, mobility=0.9, tempo=0.3, phase=0.4, initiative=0.6, space=0.5), 0.0),
-            (self._row(material=2.4, pawn_structure=1.3, center=0.7, threats=0.4, initiative=0.3, shelter_delta=0.5), 0.0),
-            (self._row(king_delta=1.6, king_black=1.2, attack_delta=1.0, attack_white=0.6, initiative=0.8, tropism=0.7, storm=0.5), 0.0),
-            (self._row(king_black=1.4, attack_white=1.0, threats=0.6, sacrifice=0.4, initiative=0.5, shelter_black=0.6), 0.0),
-            (self._row(king_white=1.0, attack_black=0.8, tempo=-0.3, phase=-0.4, mobility=0.5, shelter_white=0.7), 0.0),
-            (self._row(rook_activity=1.2, mobility=0.7, center=0.6, initiative=0.5, tempo=0.2, space=0.4), 0.0),
-            (self._row(bishop_pair=1.1, mobility=0.5, pst=0.6, phase=0.3, material=0.8, space=0.4), 0.0),
-            (self._row(sacrifice=1.3, attack_delta=0.9, king_delta=0.7, initiative=1.1, tropism=0.6, storm=0.8), 0.0),
-            (self._row(tempo=0.9, material=1.0, initiative=0.6, phase=0.2, mobility=0.4, shelter_delta=0.4), 0.0),
-            (self._row(king_black=1.0, tropism=1.2, attack_white=1.1, threats=0.5, mobility=0.3, storm=0.6), 0.0),
-            (self._row(center=1.0, threats=0.8, mobility=0.5, initiative=0.4, tempo=0.2, space=0.5), 0.0),
-            (self._row(pawn_structure=1.1, material=0.7, attack_delta=0.4, center=0.5, initiative=0.4, shelter_white=0.5), 0.0),
-            (self._row(king_delta=1.2, attack_delta=0.8, tropism=0.8, initiative=0.9, sacrifice=0.5, storm=0.7), 0.0),
-            (self._row(phase=-0.7, king_white=-1.1, attack_black=0.9, mobility=0.4, material=0.6, shelter_black=0.6), 0.0),
-            (self._row(phase=1.0, material=1.1, pst=1.3, king_delta=0.5, initiative=0.6, space=0.3), 0.0),
-            (self._row(threats=1.0, attack_delta=0.9, king_black=0.6, sacrifice=0.5, initiative=0.6, shelter_delta=0.6, storm=0.4), 0.0),
+            (self._row(material=3.2, pst=1.4, mobility=0.9, tempo=0.3, phase=0.4, initiative=0.6), 0.0),
+            (self._row(material=2.4, pawn_structure=1.3, center=0.7, threats=0.4, initiative=0.3), 0.0),
+            (self._row(king_delta=1.6, king_black=1.2, attack_delta=1.0, attack_white=0.6, initiative=0.8, tropism=0.7), 0.0),
+            (self._row(king_black=1.4, attack_white=1.0, threats=0.6, sacrifice=0.4, initiative=0.5), 0.0),
+            (self._row(king_white=1.0, attack_black=0.8, tempo=-0.3, phase=-0.4, mobility=0.5), 0.0),
+            (self._row(rook_activity=1.2, mobility=0.7, center=0.6, initiative=0.5, tempo=0.2), 0.0),
+            (self._row(bishop_pair=1.1, mobility=0.5, pst=0.6, phase=0.3, material=0.8), 0.0),
+            (self._row(sacrifice=1.3, attack_delta=0.9, king_delta=0.7, initiative=1.1, tropism=0.6), 0.0),
+            (self._row(tempo=0.9, material=1.0, initiative=0.6, phase=0.2, mobility=0.4), 0.0),
+            (self._row(king_black=1.0, tropism=1.2, attack_white=1.1, threats=0.5, mobility=0.3), 0.0),
+            (self._row(center=1.0, threats=0.8, mobility=0.5, initiative=0.4, tempo=0.2), 0.0),
+            (self._row(pawn_structure=1.1, material=0.7, attack_delta=0.4, center=0.5, initiative=0.4), 0.0),
+            (self._row(king_delta=1.2, attack_delta=0.8, tropism=0.8, initiative=0.9, sacrifice=0.5), 0.0),
+            (self._row(phase=-0.7, king_white=-1.1, attack_black=0.9, mobility=0.4, material=0.6), 0.0),
+            (self._row(phase=1.0, material=1.1, pst=1.3, king_delta=0.5, initiative=0.6), 0.0),
+            (self._row(threats=1.0, attack_delta=0.9, king_black=0.6, sacrifice=0.5, initiative=0.6), 0.0),
         ]
 
         self.layer2: List[Tuple[List[float], float]] = [
@@ -271,11 +262,6 @@ class NeuralEvaluator:
             phase=5.0,
             sacrifice=40.0,
             initiative=50.0,
-            space=38.0,
-            storm=32.0,
-            shelter_delta=26.0,
-            shelter_white=16.0,
-            shelter_black=16.0,
         )
         self.deep_scale: float = 160.0
 
@@ -328,6 +314,7 @@ class TalBotEngine:
         tropism_weight: float = 2.0,
         threat_weight: float = 2.5,
         max_check_extensions: int = 2,
+        max_sacrifice_extensions: int = 2,
     ) -> None:
         self.max_depth = max_depth
         self.time_limit = time_limit
@@ -339,6 +326,7 @@ class TalBotEngine:
         self.tropism_weight = tropism_weight
         self.threat_weight = threat_weight
         self.max_check_extensions = max(0, max_check_extensions)
+        self.max_sacrifice_extensions = max(0, max_sacrifice_extensions)
         self.neural_evaluator = NeuralEvaluator()
 
     # ------------------------------------------------------------------
@@ -430,7 +418,7 @@ class TalBotEngine:
             if state.time_exceeded():
                 break
             board.push(move)
-            value = -self._pv_search(board, depth - 1, -beta, -alpha, state, 1, 0)
+            value = -self._pv_search(board, depth - 1, -beta, -alpha, state, 1, 0, 0)
             board.pop()
 
             if state.time_exceeded():
@@ -457,6 +445,7 @@ class TalBotEngine:
         state: SearchState,
         ply: int,
         check_extensions: int,
+        sacrifice_extensions: int,
     ) -> int:
         if state.time_exceeded():
             return 0
@@ -501,6 +490,7 @@ class TalBotEngine:
                 state,
                 ply + 1,
                 0,
+                0,
             )
             board.pop()
             if null_score >= beta:
@@ -521,11 +511,13 @@ class TalBotEngine:
                 break
 
             is_capture = board.is_capture(move)
+            is_sacrifice_move = self._is_sacrifice(board, move)
 
             board.push(move)
 
             gives_check = board.is_check()
             next_check_extensions = check_extensions + 1 if gives_check else 0
+            next_sacrifice_extensions = sacrifice_extensions + 1 if is_sacrifice_move else 0
 
             reduction = 0
             if (
@@ -538,7 +530,16 @@ class TalBotEngine:
                 reduction = 1 + (1 if index > 6 else 0)
 
             extension = 1 if gives_check and depth > 1 and next_check_extensions <= self.max_check_extensions else 0
-            new_depth = depth - 1 + extension
+            sacrifice_extension = (
+                1
+                if (
+                    is_sacrifice_move
+                    and depth > 1
+                    and sacrifice_extensions < self.max_sacrifice_extensions
+                )
+                else 0
+            )
+            new_depth = depth - 1 + extension + sacrifice_extension
             if new_depth < 0:
                 new_depth = 0
 
@@ -564,6 +565,7 @@ class TalBotEngine:
                     state,
                     ply + 1,
                     next_check_extensions,
+                    next_sacrifice_extensions,
                 )
             else:
                 score = -self._pv_search(
@@ -574,6 +576,7 @@ class TalBotEngine:
                     state,
                     ply + 1,
                     next_check_extensions,
+                    next_sacrifice_extensions,
                 )
                 if score > alpha:
                     score = -self._pv_search(
@@ -584,6 +587,7 @@ class TalBotEngine:
                         state,
                         ply + 1,
                         next_check_extensions,
+                        next_sacrifice_extensions,
                     )
 
             board.pop()
@@ -703,6 +707,53 @@ class TalBotEngine:
         attacker_val = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
         return victim_val - attacker_val >= threshold
 
+    def _is_sacrifice(self, board: chess.Board, move: chess.Move) -> bool:
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            return False
+        mover_value = PIECE_VALUES.get(piece.piece_type, 0)
+        if mover_value <= PIECE_VALUES[chess.PAWN]:
+            return False
+
+        capture = board.piece_at(move.to_square)
+        capture_value = PIECE_VALUES.get(capture.piece_type, 0) if capture else 0
+
+        see = getattr(board, "see", None)
+        if callable(see):
+            swing = see(move)
+        else:
+            swing = capture_value - mover_value
+
+        margin = max(60, mover_value // 2)
+        if capture:
+            margin = max(40, mover_value - capture_value)
+        if swing < -margin:
+            return True
+
+        if capture:
+            return False
+
+        board.push(move)
+        try:
+            enemy = not piece.color
+            attackers = board.attackers(enemy, move.to_square)
+            if not attackers:
+                return False
+            defenders = board.attackers(piece.color, move.to_square)
+            if len(defenders) >= len(attackers):
+                return False
+            min_attacker_value = min(
+                (
+                    PIECE_VALUES.get(board.piece_at(sq).piece_type, mover_value)
+                    for sq in attackers
+                    if board.piece_at(sq) is not None
+                ),
+                default=mover_value,
+            )
+            return min_attacker_value + 30 < mover_value
+        finally:
+            board.pop()
+
     def _gives_check(self, board: chess.Board, move: chess.Move) -> bool:
         pushed = False
         try:
@@ -776,13 +827,6 @@ class TalBotEngine:
         tropism_white, tropism_black = self._king_tropism(board)
         tropism_delta = tropism_white - tropism_black
         tropism_score = tropism_delta * self.tropism_weight
-        space_white, space_black = self._space_control(board)
-        space_delta = space_white - space_black
-        space_score = float(space_delta) * 6.0
-        storm_white, storm_black = self._pawn_storm(board)
-        storm_delta = storm_white - storm_black
-        shelter_white, shelter_black = self._king_shelter(board)
-        shelter_delta = shelter_white - shelter_black
         sacrifice_raw = self._sacrifice_bias_eval(
             board,
             material_white=self._material_total(board, chess.WHITE),
@@ -807,8 +851,6 @@ class TalBotEngine:
             - max(0.0, -float(king_white_score))
             + center_score
             + threats_score
-            + space_score * 0.4
-            + storm_delta * 3.0
             + tropism_score
         )
 
@@ -832,11 +874,6 @@ class TalBotEngine:
             "phase": phase,
             "sacrifice": float(sacrifice_signal) / 150.0,
             "initiative": float(initiative_score) / 400.0,
-            "space": float(space_score) / 150.0,
-            "storm": float(storm_delta) / 80.0,
-            "shelter_delta": float(shelter_delta) / 15.0,
-            "shelter_white": float(shelter_white) / 12.0,
-            "shelter_black": -float(shelter_black) / 12.0,
         }
 
         score = self.neural_evaluator.evaluate(features)
@@ -1021,80 +1058,6 @@ class TalBotEngine:
             return pressure
 
         return tropism(chess.WHITE), tropism(chess.BLACK)
-
-    def _space_control(self, board: chess.Board) -> Tuple[int, int]:
-        white_mask = 0
-        black_mask = 0
-        for square, piece in board.piece_map().items():
-            attacks = int(board.attacks(square))
-            if piece.color == chess.WHITE:
-                white_mask |= attacks
-            else:
-                black_mask |= attacks
-
-        white_space = popcount(white_mask & WHITE_ENEMY_HALF)
-        black_space = popcount(black_mask & BLACK_ENEMY_HALF)
-        return white_space, black_space
-
-    def _king_shelter(self, board: chess.Board) -> Tuple[int, int]:
-        def shelter(color: chess.Color) -> int:
-            king_square = board.king(color)
-            if king_square is None:
-                return 0
-            pawns = board.pieces(chess.PAWN, color)
-            file = chess.square_file(king_square)
-            rank = chess.square_rank(king_square)
-            direction = 1 if color == chess.WHITE else -1
-            score = 0
-
-            for df in (-1, 0, 1):
-                file_offset = file + df
-                if not 0 <= file_offset < 8:
-                    continue
-                for distance, weight in enumerate(KING_SHELTER_WEIGHTS, start=1):
-                    r = rank + direction * distance
-                    if not 0 <= r < 8:
-                        break
-                    square = chess.square(file_offset, r)
-                    if square in pawns:
-                        score += weight
-                        break
-            return score
-
-        return shelter(chess.WHITE), shelter(chess.BLACK)
-
-    def _pawn_storm(self, board: chess.Board) -> Tuple[int, int]:
-        def storm(color: chess.Color) -> int:
-            enemy = not color
-            enemy_king = board.king(enemy)
-            if enemy_king is None:
-                return 0
-            target_file = chess.square_file(enemy_king)
-            target_rank = chess.square_rank(enemy_king)
-            total = 0
-
-            for pawn in board.pieces(chess.PAWN, color):
-                pawn_file = chess.square_file(pawn)
-                pawn_rank = chess.square_rank(pawn)
-                file_distance = abs(pawn_file - target_file)
-                if file_distance > 2:
-                    continue
-                if color == chess.WHITE:
-                    if pawn_rank > target_rank:
-                        continue
-                    advance = target_rank - pawn_rank
-                else:
-                    if pawn_rank < target_rank:
-                        continue
-                    advance = pawn_rank - target_rank
-
-                proximity = max(0, 6 - advance)
-                lateral = max(0, 3 - file_distance)
-                if proximity and lateral:
-                    total += proximity * (lateral + 1)
-            return total
-
-        return storm(chess.WHITE), storm(chess.BLACK)
 
     def _threat_map(self, board: chess.Board) -> int:
         score = 0
