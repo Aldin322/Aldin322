@@ -166,6 +166,116 @@ class SearchState:
         return self.stop
 
 
+class NeuralEvaluator:
+    """A lightweight neural network to score chess features."""
+
+    FEATURE_ORDER = [
+        "material",
+        "pst",
+        "mobility",
+        "king_delta",
+        "king_white",
+        "king_black",
+        "attack_delta",
+        "attack_white",
+        "attack_black",
+        "pawn_structure",
+        "rook_activity",
+        "bishop_pair",
+        "center",
+        "threats",
+        "tropism",
+        "tempo",
+        "phase",
+        "sacrifice",
+        "initiative",
+    ]
+
+    def __init__(self) -> None:
+        self.feature_index = {name: idx for idx, name in enumerate(self.FEATURE_ORDER)}
+
+        # Hidden layers emphasise different combinations of features.
+        self.layer1: List[Tuple[List[float], float]] = [
+            (self._row(material=3.2, pst=1.4, mobility=0.9, tempo=0.3, phase=0.4, initiative=0.6), 0.0),
+            (self._row(material=2.4, pawn_structure=1.3, center=0.7, threats=0.4, initiative=0.3), 0.0),
+            (self._row(king_delta=1.6, king_black=1.2, attack_delta=1.0, attack_white=0.6, initiative=0.8, tropism=0.7), 0.0),
+            (self._row(king_black=1.4, attack_white=1.0, threats=0.6, sacrifice=0.4, initiative=0.5), 0.0),
+            (self._row(king_white=1.0, attack_black=0.8, tempo=-0.3, phase=-0.4, mobility=0.5), 0.0),
+            (self._row(rook_activity=1.2, mobility=0.7, center=0.6, initiative=0.5, tempo=0.2), 0.0),
+            (self._row(bishop_pair=1.1, mobility=0.5, pst=0.6, phase=0.3, material=0.8), 0.0),
+            (self._row(sacrifice=1.3, attack_delta=0.9, king_delta=0.7, initiative=1.1, tropism=0.6), 0.0),
+            (self._row(tempo=0.9, material=1.0, initiative=0.6, phase=0.2, mobility=0.4), 0.0),
+            (self._row(king_black=1.0, tropism=1.2, attack_white=1.1, threats=0.5, mobility=0.3), 0.0),
+            (self._row(center=1.0, threats=0.8, mobility=0.5, initiative=0.4, tempo=0.2), 0.0),
+            (self._row(pawn_structure=1.1, material=0.7, attack_delta=0.4, center=0.5, initiative=0.4), 0.0),
+            (self._row(king_delta=1.2, attack_delta=0.8, tropism=0.8, initiative=0.9, sacrifice=0.5), 0.0),
+            (self._row(phase=-0.7, king_white=-1.1, attack_black=0.9, mobility=0.4, material=0.6), 0.0),
+            (self._row(phase=1.0, material=1.1, pst=1.3, king_delta=0.5, initiative=0.6), 0.0),
+            (self._row(threats=1.0, attack_delta=0.9, king_black=0.6, sacrifice=0.5, initiative=0.6), 0.0),
+        ]
+
+        self.layer2: List[Tuple[List[float], float]] = [
+            ([1.1, 0.8, 1.0, 0.6, 0.4, 0.7, 0.5, 1.0, 0.3, 0.8, 0.6, 0.5, 0.7, 0.4, 0.9, 0.8], 0.0),
+            ([0.6, 0.7, 0.9, 0.8, 0.6, 0.7, 0.5, 0.9, 0.4, 0.9, 0.5, 0.6, 0.8, 0.3, 0.7, 0.6], 0.0),
+            ([0.7, 0.5, 0.8, 0.7, 0.5, 0.6, 0.4, 0.9, 0.3, 0.8, 0.5, 0.7, 0.6, 0.4, 0.8, 0.7], 0.0),
+            ([0.9, 0.6, 0.7, 0.9, 0.4, 0.8, 0.5, 0.8, 0.2, 0.7, 0.6, 0.6, 0.7, 0.5, 0.9, 0.7], 0.0),
+            ([0.8, 0.7, 0.6, 0.8, 0.5, 0.6, 0.4, 0.7, 0.3, 0.7, 0.6, 0.5, 0.8, 0.6, 0.8, 0.6], 0.0),
+            ([0.6, 0.5, 0.7, 0.6, 0.4, 0.6, 0.3, 0.8, 0.2, 0.6, 0.5, 0.5, 0.7, 0.3, 0.7, 0.6], 0.0),
+            ([0.9, 0.8, 0.7, 0.8, 0.5, 0.7, 0.4, 0.9, 0.3, 0.8, 0.6, 0.6, 0.8, 0.5, 0.9, 0.8], 0.0),
+            ([0.7, 0.6, 0.6, 0.7, 0.4, 0.6, 0.3, 0.8, 0.2, 0.7, 0.5, 0.5, 0.7, 0.4, 0.8, 0.6], 0.0),
+        ]
+
+        self.output_weights: List[float] = [0.9, 0.7, 0.8, 0.85, 0.65, 0.6, 0.9, 0.7]
+        self.output_bias: float = 0.0
+        self.direct_weights: List[float] = self._row(
+            material=140.0,
+            pst=110.0,
+            mobility=65.0,
+            king_delta=90.0,
+            king_white=35.0,
+            king_black=55.0,
+            attack_delta=70.0,
+            attack_white=25.0,
+            attack_black=45.0,
+            pawn_structure=45.0,
+            rook_activity=30.0,
+            bishop_pair=25.0,
+            center=35.0,
+            threats=28.0,
+            tropism=32.0,
+            tempo=8.0,
+            phase=5.0,
+            sacrifice=40.0,
+            initiative=50.0,
+        )
+
+    def evaluate(self, features: Dict[str, float]) -> float:
+        vector = [features.get(name, 0.0) for name in self.FEATURE_ORDER]
+        linear = sum(weight * value for weight, value in zip(self.direct_weights, vector))
+
+        hidden1 = [
+            self._activation(sum(weight * value for weight, value in zip(weights, vector)) + bias)
+            for weights, bias in self.layer1
+        ]
+        hidden2 = [
+            self._activation(sum(weight * value for weight, value in zip(weights, hidden1)) + bias)
+            for weights, bias in self.layer2
+        ]
+
+        deep_score = sum(weight * value for weight, value in zip(self.output_weights, hidden2)) + self.output_bias
+        return linear + deep_score * 80.0
+
+    @staticmethod
+    def _activation(value: float) -> float:
+        return value if value >= 0 else 0.1 * value
+
+    def _row(self, **weights: float) -> List[float]:
+        row = [0.0] * len(self.FEATURE_ORDER)
+        for name, weight in weights.items():
+            row[self.feature_index[name]] = weight
+        return row
+
+
 class TalBotEngine:
     """A new Tal-inspired chess engine favouring sound sacrifices."""
 
@@ -192,6 +302,7 @@ class TalBotEngine:
         self.tropism_weight = tropism_weight
         self.threat_weight = threat_weight
         self.max_check_extensions = max(0, max_check_extensions)
+        self.neural_evaluator = NeuralEvaluator()
 
     # ------------------------------------------------------------------
     # Public API
@@ -610,16 +721,25 @@ class TalBotEngine:
 
         material = self._material_balance(board)
         pst = self._piece_square(board)
-        mobility = self._mobility(board) * self.mobility_weight
+        mobility_raw = self._mobility(board)
+        mobility_score = mobility_raw * self.mobility_weight
         king_safety_white, king_safety_black = self._king_safety(board)
+        king_white_score = king_safety_white * self.king_safety_weight
+        king_black_score = king_safety_black * self.king_safety_weight
         attack_white, attack_black = self._attack_pressure(board)
+        attack_white_score = attack_white * self.attack_weight
+        attack_black_score = attack_black * self.attack_weight
         pawn_structure = self._pawn_structure(board)
         rook_activity = self._rook_activity(board)
         bishop_pair = self._bishop_pair(board)
-        center_control = self._center_control(board)
-        threats = self._threat_map(board)
+        center_raw = self._center_control(board)
+        center_score = center_raw * self.center_weight
+        threats_raw = self._threat_map(board)
+        threats_score = threats_raw * self.threat_weight
         tropism_white, tropism_black = self._king_tropism(board)
-        sacrifice = self._sacrifice_bias_eval(
+        tropism_delta = tropism_white - tropism_black
+        tropism_score = tropism_delta * self.tropism_weight
+        sacrifice_raw = self._sacrifice_bias_eval(
             board,
             material_white=self._material_total(board, chess.WHITE),
             material_black=self._material_total(board, chess.BLACK),
@@ -627,29 +747,49 @@ class TalBotEngine:
             attack_black=attack_black,
             king_white=king_safety_white,
             king_black=king_safety_black,
-            threats=threats,
-            center=center_control,
+            threats=threats_raw,
+            center=center_raw,
             tropism_white=tropism_white,
             tropism_black=tropism_black,
         )
-        tempo = 12 if board.turn == chess.WHITE else -12
 
-        score = (
-            material
-            + pst
-            + mobility
-            + (attack_white - attack_black) * self.attack_weight
-            + (king_safety_white - king_safety_black) * self.king_safety_weight
-            + center_control * self.center_weight
-            + (tropism_white - tropism_black) * self.tropism_weight
-            + threats * self.threat_weight
-            + sacrifice
-            + pawn_structure
-            + rook_activity
-            + bishop_pair
-            + tempo
+        tempo_signal = 1.0 if board.turn == chess.WHITE else -1.0
+        phase = self._phase(board)
+        sacrifice_signal = sacrifice_raw if board.turn == chess.WHITE else -sacrifice_raw
+
+        initiative_score = (
+            (attack_white_score - attack_black_score)
+            + max(0.0, -float(king_black_score))
+            - max(0.0, -float(king_white_score))
+            + center_score
+            + threats_score
         )
-        return score if board.turn == chess.WHITE else -score
+
+        features = {
+            "material": float(material) / 1000.0,
+            "pst": float(pst) / 800.0,
+            "mobility": float(mobility_score) / 150.0,
+            "king_delta": float(king_white_score - king_black_score) / 400.0,
+            "king_white": float(king_white_score) / 400.0,
+            "king_black": -float(king_black_score) / 400.0,
+            "attack_delta": float(attack_white_score - attack_black_score) / 300.0,
+            "attack_white": float(attack_white_score) / 300.0,
+            "attack_black": -float(attack_black_score) / 300.0,
+            "pawn_structure": float(pawn_structure) / 200.0,
+            "rook_activity": float(rook_activity) / 120.0,
+            "bishop_pair": float(bishop_pair) / 60.0,
+            "center": float(center_score) / 80.0,
+            "threats": float(threats_score) / 120.0,
+            "tropism": float(tropism_score) / 140.0,
+            "tempo": tempo_signal,
+            "phase": phase,
+            "sacrifice": float(sacrifice_signal) / 150.0,
+            "initiative": float(initiative_score) / 400.0,
+        }
+
+        score = self.neural_evaluator.evaluate(features)
+        score = max(-MATE_THRESHOLD, min(MATE_THRESHOLD, score))
+        return int(score) if board.turn == chess.WHITE else int(-score)
 
     def _material_balance(self, board: chess.Board) -> int:
         score = 0
