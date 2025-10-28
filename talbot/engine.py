@@ -619,17 +619,59 @@ class TalBotEngine:
         attack_white: int,
         attack_black: int,
     ) -> int:
-        material_diff = material_white - material_black
-        attack_diff = attack_white - attack_black
-        # Reward dynamic imbalance that favours attacks.
-        base = -self.sacrifice_bias * material_diff
-        attack_factor = int(1.7 * attack_diff)
-        if material_diff < 0:
-            base += int(0.45 * (-material_diff) * (attack_white + 2))
-        elif material_diff > 0:
-            base -= int(0.35 * material_diff * (attack_black + 2))
-        initiative = 30 if board.turn == chess.WHITE else -30
-        return base + attack_factor + initiative
+        white_deficit = max(0, material_black - material_white)
+        black_deficit = max(0, material_white - material_black)
+
+        score = 0.0
+        if white_deficit:
+            compensation = self._sacrifice_compensation(
+                board, chess.WHITE, attack_white, attack_black
+            )
+            net = compensation - white_deficit / 100.0
+            score += self.sacrifice_bias * 100.0 * max(-2.5, min(2.5, net))
+        if black_deficit:
+            compensation = self._sacrifice_compensation(
+                board, chess.BLACK, attack_black, attack_white
+            )
+            net = compensation - black_deficit / 100.0
+            score -= self.sacrifice_bias * 100.0 * max(-2.5, min(2.5, net))
+
+        initiative = 18 if board.turn == chess.WHITE else -18
+        score += initiative
+        return int(score)
+
+    def _sacrifice_compensation(
+        self,
+        board: chess.Board,
+        color: chess.Color,
+        attack_for: int,
+        attack_against: int,
+    ) -> float:
+        enemy = not color
+        pressure_edge = max(0, attack_for - attack_against)
+        exposure_edge = max(
+            0,
+            self._king_exposure(board, enemy) - self._king_exposure(board, color),
+        )
+        check_bonus = 1.8 if board.is_check() and board.turn == color else 0.0
+        return (0.45 * pressure_edge + 0.55 * exposure_edge) / 3.0 + check_bonus
+
+    def _king_exposure(self, board: chess.Board, color: chess.Color) -> int:
+        king_square = board.king(color)
+        if king_square is None:
+            return 0
+        enemy = not color
+        ring = chess.SquareSet(
+            chess.BB_KING_ATTACKS[king_square] | chess.BB_SQUARES[king_square]
+        )
+        enemy_attacks = 0
+        friendly_support = 0
+        for square in ring:
+            enemy_attacks += len(board.attackers(enemy, square))
+            friendly_support += len(board.attackers(color, square))
+        open_files = self._open_files_near_king(board, king_square, color)
+        exposure = max(0, enemy_attacks - friendly_support) + 2 * open_files
+        return exposure
 
     def _game_phase(self, board: chess.Board) -> float:
         phase_weights = {
