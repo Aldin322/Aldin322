@@ -1,0 +1,1714 @@
+"""TalBot: a fresh sacrificial chess engine built from scratch."""
+from __future__ import annotations
+
+import math
+import time
+import warnings
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import chess
+
+try:
+    import torch
+    from torch import nn
+    from torch.nn import functional as F
+except ImportError:  # pragma: no cover - PyTorch is optional at runtime
+    torch = None
+    nn = None
+    F = None
+else:  # pragma: no cover - configuring optional dependency
+    warnings.filterwarnings(
+        "ignore",
+        message="Failed to initialize NumPy",
+        module="torch.nn.modules.linear",
+    )
+
+
+MATE_SCORE = 1_000_000
+MATE_THRESHOLD = MATE_SCORE - 1_000
+MAX_PLY = 128
+
+try:
+    popcount = chess.popcount
+except AttributeError:  # pragma: no cover - compatibility path
+    def popcount(value: int) -> int:
+        return bin(value).count("1")
+
+PIECE_VALUES = {
+    chess.PAWN: 100,
+    chess.KNIGHT: 325,
+    chess.BISHOP: 330,
+    chess.ROOK: 520,
+    chess.QUEEN: 1_000,
+    chess.KING: 0,
+}
+
+
+# Piece-square tables tuned for central control and king aggression.
+PAWN_TABLE = [
+      0,   5,  10,  20,  20,  10,   5,   0,
+     10,  20,  25,  35,  35,  25,  20,  10,
+      5,  15,  20,  30,  30,  20,  15,   5,
+      0,   5,  15,  25,  25,  15,   5,   0,
+      0,   0,   5,  20,  20,   5,   0,   0,
+     -5,  -5,   5,  10,  10,   5,  -5,  -5,
+    -10, -10, -10, -20, -20, -10, -10, -10,
+      0,   0,   0,   0,   0,   0,   0,   0,
+]
+
+KNIGHT_TABLE = [
+    -50, -40, -25, -20, -20, -25, -40, -50,
+    -35, -15,   0,   5,   5,   0, -15, -35,
+    -25,   5,  20,  25,  25,  20,   5, -25,
+    -15,  10,  25,  30,  30,  25,  10, -15,
+    -15,   5,  20,  30,  30,  20,   5, -15,
+    -25,   0,  15,  20,  20,  15,   0, -25,
+    -40, -20,  -5,   0,   0,  -5, -20, -40,
+    -55, -35, -30, -30, -30, -30, -35, -55,
+]
+
+BISHOP_TABLE = [
+    -20, -10, -10, -10, -10, -10, -10, -20,
+    -10,   5,  10,  15,  15,  10,   5, -10,
+     -5,  10,  15,  20,  20,  15,  10,  -5,
+     -5,  10,  20,  25,  25,  20,  10,  -5,
+     -5,  10,  20,  25,  25,  20,  10,  -5,
+    -10,   5,  10,  15,  15,  10,   5, -10,
+    -15, -10,  -5,   0,   0,  -5, -10, -15,
+    -20, -15, -15, -15, -15, -15, -15, -20,
+]
+
+ROOK_TABLE = [
+      0,   0,   5,  10,  10,   5,   0,   0,
+      0,   0,  10,  15,  15,  10,   0,   0,
+      0,   0,  10,  15,  15,  10,   0,   0,
+      5,  10,  15,  20,  20,  15,  10,   5,
+      5,  10,  15,  20,  20,  15,  10,   5,
+     10,  10,  15,  20,  20,  15,  10,  10,
+     10,  10,  15,  20,  20,  15,  10,  10,
+      0,   0,   5,  10,  10,   5,   0,   0,
+]
+
+QUEEN_TABLE = [
+    -15, -10, -10,  -5,  -5, -10, -10, -15,
+    -10,  -5,   0,   0,   0,   0,  -5, -10,
+     -5,   0,   5,   5,   5,   5,   0,  -5,
+      0,   0,   5,   5,   5,   5,   0,   0,
+      0,   0,   5,   5,   5,   5,   0,   0,
+     -5,   0,   5,   5,   5,   5,   0,  -5,
+    -10,  -5,   0,   0,   0,   0,  -5, -10,
+    -15, -10, -10,  -5,  -5, -10, -10, -15,
+]
+
+KING_MIDDLEGAME = [
+    -40, -30, -30, -40, -40, -30, -30, -40,
+    -30, -20, -20, -30, -30, -20, -20, -30,
+    -20, -10, -10, -20, -20, -10, -10, -20,
+    -20,  -5,   0,  -5,  -5,   0,  -5, -20,
+    -10,   0,  10,  20,  20,  10,   0, -10,
+     -5,   5,  15,  25,  25,  15,   5,  -5,
+     20,  25,  30,  35,  35,  30,  25,  20,
+     20,  30,  30,  40,  40,  30,  30,  20,
+]
+
+KING_ENDGAME = [
+    -30, -20, -20, -20, -20, -20, -20, -30,
+    -20, -10,   0,   0,   0,   0, -10, -20,
+    -20,   0,  10,  15,  15,  10,   0, -20,
+    -20,   0,  15,  25,  25,  15,   0, -20,
+    -20,   0,  15,  25,  25,  15,   0, -20,
+    -20,   0,  10,  15,  15,  10,   0, -20,
+    -20, -10,   0,   0,   0,   0, -10, -20,
+    -30, -20, -20, -20, -20, -20, -20, -30,
+]
+
+PIECE_SQUARE_TABLES = {
+    chess.PAWN: PAWN_TABLE,
+    chess.KNIGHT: KNIGHT_TABLE,
+    chess.BISHOP: BISHOP_TABLE,
+    chess.ROOK: ROOK_TABLE,
+    chess.QUEEN: QUEEN_TABLE,
+}
+
+PASSED_PAWN_BONUS = [0, 18, 35, 60, 95, 150, 230, 0]
+ISOLATED_PAWN_PENALTY = 18
+DOUBLED_PAWN_PENALTY = 14
+ROOK_OPEN_FILE_BONUS = 28
+ROOK_SEMI_OPEN_FILE_BONUS = 14
+BISHOP_PAIR_BONUS = 35
+CENTER_SQUARES = [chess.D4, chess.E4, chess.D5, chess.E5]
+EXTENDED_CENTER = [
+    chess.C3,
+    chess.C4,
+    chess.C5,
+    chess.C6,
+    chess.D3,
+    chess.D4,
+    chess.D5,
+    chess.D6,
+    chess.E3,
+    chess.E4,
+    chess.E5,
+    chess.E6,
+    chess.F3,
+    chess.F4,
+    chess.F5,
+    chess.F6,
+]
+TROPISM_PIECES = {chess.QUEEN: 14, chess.ROOK: 10, chess.BISHOP: 9, chess.KNIGHT: 8}
+
+
+@dataclass
+class TTEntry:
+    depth: int
+    value: int
+    flag: str
+    move: Optional[chess.Move]
+    generation: int
+
+
+@dataclass
+class SearchState:
+    start_time: float
+    time_limit: float
+    transposition: Dict[int, TTEntry] = field(default_factory=dict)
+    killers: Dict[int, List[chess.Move]] = field(default_factory=dict)
+    history: Dict[Tuple[int, int], int] = field(default_factory=dict)
+    countermoves: Dict[Tuple[int, int], chess.Move] = field(default_factory=dict)
+    capture_history: Dict[Tuple[int, int], int] = field(default_factory=dict)
+    nodes: int = 0
+    stop: bool = False
+    generation: int = 0
+    eval_cache: Dict[int, int] = field(default_factory=dict)
+
+    def time_exceeded(self) -> bool:
+        if self.stop:
+            return True
+        if self.time_limit <= 0:
+            return False
+        if time.time() - self.start_time >= self.time_limit:
+            self.stop = True
+        return self.stop
+
+
+class NeuralEvaluator:
+    """PyTorch-backed neural network (with a pure-Python fallback) to score chess features."""
+
+    FEATURE_ORDER = [
+        "material",
+        "pst",
+        "mobility",
+        "king_delta",
+        "king_white",
+        "king_black",
+        "attack_delta",
+        "attack_white",
+        "attack_black",
+        "pawn_structure",
+        "rook_activity",
+        "bishop_pair",
+        "center",
+        "threats",
+        "tropism",
+        "tempo",
+        "phase",
+        "sacrifice",
+        "initiative",
+    ]
+
+    def __init__(self) -> None:
+        self.feature_index = {name: idx for idx, name in enumerate(self.FEATURE_ORDER)}
+
+        self.deep_scale: float = 160.0
+
+        # Define the neural layers using PyTorch so the engine evaluation can
+        # benefit from optimised tensor math while keeping deterministic
+        # initial weights tuned for Tal-flavoured play. If PyTorch is absent
+        # (e.g. on constrained systems), we fall back to a numerically
+        # equivalent Python execution path.
+        input_size = len(self.FEATURE_ORDER)
+
+        layer1_rows: List[Tuple[List[float], float]] = [
+            (self._row(material=3.2, pst=1.4, mobility=0.9, tempo=0.3, phase=0.4, initiative=0.6), 0.0),
+            (self._row(material=2.4, pawn_structure=1.3, center=0.7, threats=0.4, initiative=0.3), 0.0),
+            (self._row(king_delta=1.6, king_black=1.2, attack_delta=1.0, attack_white=0.6, initiative=0.8, tropism=0.7), 0.0),
+            (self._row(king_black=1.4, attack_white=1.0, threats=0.6, sacrifice=0.4, initiative=0.5), 0.0),
+            (self._row(king_white=1.0, attack_black=0.8, tempo=-0.3, phase=-0.4, mobility=0.5), 0.0),
+            (self._row(rook_activity=1.2, mobility=0.7, center=0.6, initiative=0.5, tempo=0.2), 0.0),
+            (self._row(bishop_pair=1.1, mobility=0.5, pst=0.6, phase=0.3, material=0.8), 0.0),
+            (self._row(sacrifice=1.3, attack_delta=0.9, king_delta=0.7, initiative=1.1, tropism=0.6), 0.0),
+            (self._row(tempo=0.9, material=1.0, initiative=0.6, phase=0.2, mobility=0.4), 0.0),
+            (self._row(king_black=1.0, tropism=1.2, attack_white=1.1, threats=0.5, mobility=0.3), 0.0),
+            (self._row(center=1.0, threats=0.8, mobility=0.5, initiative=0.4, tempo=0.2), 0.0),
+            (self._row(pawn_structure=1.1, material=0.7, attack_delta=0.4, center=0.5, initiative=0.4), 0.0),
+            (self._row(king_delta=1.2, attack_delta=0.8, tropism=0.8, initiative=0.9, sacrifice=0.5), 0.0),
+            (self._row(phase=-0.7, king_white=-1.1, attack_black=0.9, mobility=0.4, material=0.6), 0.0),
+            (self._row(phase=1.0, material=1.1, pst=1.3, king_delta=0.5, initiative=0.6), 0.0),
+            (self._row(threats=1.0, attack_delta=0.9, king_black=0.6, sacrifice=0.5, initiative=0.6), 0.0),
+        ]
+
+        layer2_rows: List[Tuple[List[float], float]] = [
+            ([1.1, 0.8, 1.0, 0.6, 0.4, 0.7, 0.5, 1.0, 0.3, 0.8, 0.6, 0.5, 0.7, 0.4, 0.9, 0.8], 0.0),
+            ([0.6, 0.7, 0.9, 0.8, 0.6, 0.7, 0.5, 0.9, 0.4, 0.9, 0.5, 0.6, 0.8, 0.3, 0.7, 0.6], 0.0),
+            ([0.7, 0.5, 0.8, 0.7, 0.5, 0.6, 0.4, 0.9, 0.3, 0.8, 0.5, 0.7, 0.6, 0.4, 0.8, 0.7], 0.0),
+            ([0.9, 0.6, 0.7, 0.9, 0.4, 0.8, 0.5, 0.8, 0.2, 0.7, 0.6, 0.6, 0.7, 0.5, 0.9, 0.7], 0.0),
+            ([0.8, 0.7, 0.6, 0.8, 0.5, 0.6, 0.4, 0.7, 0.3, 0.7, 0.6, 0.5, 0.8, 0.6, 0.8, 0.6], 0.0),
+            ([0.6, 0.5, 0.7, 0.6, 0.4, 0.6, 0.3, 0.8, 0.2, 0.6, 0.5, 0.5, 0.7, 0.3, 0.7, 0.6], 0.0),
+            ([0.9, 0.8, 0.7, 0.8, 0.5, 0.7, 0.4, 0.9, 0.3, 0.8, 0.6, 0.6, 0.8, 0.5, 0.9, 0.8], 0.0),
+            ([0.7, 0.6, 0.6, 0.7, 0.4, 0.6, 0.3, 0.8, 0.2, 0.7, 0.5, 0.5, 0.7, 0.4, 0.8, 0.6], 0.0),
+        ]
+
+        layer3_rows: List[Tuple[List[float], float]] = [
+            ([0.9, 0.7, 0.8, 0.9, 0.7, 0.6, 0.8, 0.7], 0.0),
+            ([0.8, 0.9, 0.7, 0.8, 0.6, 0.7, 0.8, 0.6], 0.0),
+            ([0.7, 0.8, 0.9, 0.7, 0.6, 0.7, 0.8, 0.7], 0.0),
+            ([0.9, 0.8, 0.8, 0.9, 0.7, 0.8, 0.9, 0.8], 0.0),
+            ([0.8, 0.7, 0.8, 0.7, 0.6, 0.7, 0.8, 0.7], 0.0),
+            ([0.7, 0.8, 0.7, 0.8, 0.6, 0.7, 0.8, 0.6], 0.0),
+        ]
+
+        output_weights: List[float] = [0.95, 0.85, 0.8, 0.9, 0.7, 0.75]
+        output_bias: float = 0.0
+
+        direct_weights = self._row(
+            material=140.0,
+            pst=110.0,
+            mobility=65.0,
+            king_delta=90.0,
+            king_white=35.0,
+            king_black=55.0,
+            attack_delta=70.0,
+            attack_white=25.0,
+            attack_black=45.0,
+            pawn_structure=45.0,
+            rook_activity=30.0,
+            bishop_pair=25.0,
+            center=35.0,
+            threats=28.0,
+            tropism=32.0,
+            tempo=8.0,
+            phase=5.0,
+            sacrifice=40.0,
+            initiative=50.0,
+        )
+
+        self.direct_weights = direct_weights
+        self.layer1_rows = layer1_rows
+        self.layer2_rows = layer2_rows
+        self.layer3_rows = layer3_rows
+        self.output_weights = output_weights
+        self.output_bias = output_bias
+
+        self._use_torch = torch is not None
+        if self._use_torch:
+            self.linear_head = nn.Linear(input_size, 1, bias=False)
+            self.layer1 = nn.Linear(input_size, len(layer1_rows), bias=True)
+            self.layer2 = nn.Linear(len(layer1_rows), len(layer2_rows), bias=True)
+            self.layer3 = nn.Linear(len(layer2_rows), len(layer3_rows), bias=True)
+            self.output_layer = nn.Linear(len(layer3_rows), 1, bias=True)
+
+            with torch.no_grad():
+                self.linear_head.weight.copy_(torch.tensor([direct_weights], dtype=torch.float32))
+
+                self.layer1.weight.copy_(
+                    torch.tensor([weights for weights, _ in layer1_rows], dtype=torch.float32)
+                )
+                self.layer1.bias.copy_(torch.tensor([bias for _, bias in layer1_rows], dtype=torch.float32))
+
+                self.layer2.weight.copy_(
+                    torch.tensor([weights for weights, _ in layer2_rows], dtype=torch.float32)
+                )
+                self.layer2.bias.copy_(torch.tensor([bias for _, bias in layer2_rows], dtype=torch.float32))
+
+                self.layer3.weight.copy_(
+                    torch.tensor([weights for weights, _ in layer3_rows], dtype=torch.float32)
+                )
+                self.layer3.bias.copy_(torch.tensor([bias for _, bias in layer3_rows], dtype=torch.float32))
+
+                self.output_layer.weight.copy_(
+                    torch.tensor([output_weights], dtype=torch.float32)
+                )
+                self.output_layer.bias.copy_(torch.tensor([output_bias], dtype=torch.float32))
+
+            for module in (self.linear_head, self.layer1, self.layer2, self.layer3, self.output_layer):
+                module.eval()
+                module.requires_grad_(False)
+
+    def evaluate(self, features: Dict[str, float]) -> float:
+        vector = [features.get(name, 0.0) for name in self.FEATURE_ORDER]
+
+        if self._use_torch:
+            tensor = torch.tensor(vector, dtype=torch.float32)
+            with torch.no_grad():
+                linear = self.linear_head(tensor).squeeze(-1)
+                hidden1 = F.leaky_relu(self.layer1(tensor), negative_slope=0.1)
+                hidden2 = F.leaky_relu(self.layer2(hidden1), negative_slope=0.1)
+                hidden3 = F.leaky_relu(self.layer3(hidden2), negative_slope=0.1)
+                deep_raw = self.output_layer(hidden3).squeeze(-1)
+                modulation = hidden1.mean()
+                deep_score = torch.tanh(deep_raw + 0.5 * modulation)
+                result = linear + deep_score * self.deep_scale
+            return float(result.item())
+
+        linear = sum(weight * value for weight, value in zip(self.direct_weights, vector))
+
+        hidden1 = [
+            self._activation(sum(weight * value for weight, value in zip(weights, vector)) + bias)
+            for weights, bias in self.layer1_rows
+        ]
+        hidden2 = [
+            self._activation(sum(weight * value for weight, value in zip(weights, hidden1)) + bias)
+            for weights, bias in self.layer2_rows
+        ]
+
+        hidden3 = [
+            self._activation(sum(weight * value for weight, value in zip(weights, hidden2)) + bias)
+            for weights, bias in self.layer3_rows
+        ]
+
+        deep_raw = sum(weight * value for weight, value in zip(self.output_weights, hidden3)) + self.output_bias
+        modulation = sum(hidden1) / (len(hidden1) or 1)
+        deep_score = math.tanh(deep_raw + 0.5 * modulation)
+        return linear + deep_score * self.deep_scale
+
+    @staticmethod
+    def _activation(value: float) -> float:
+        return value if value >= 0 else 0.1 * value
+
+    def _row(self, **weights: float) -> List[float]:
+        row = [0.0] * len(self.FEATURE_ORDER)
+        for name, weight in weights.items():
+            row[self.feature_index[name]] = weight
+        return row
+
+
+class TalBotEngine:
+    """A new Tal-inspired chess engine favouring sound sacrifices."""
+
+    def __init__(
+        self,
+        max_depth: int = 17,
+        time_limit: float = 6.0,
+        sacrifice_bias: float = 12.0,
+        attack_weight: float = 7.0,
+        king_safety_weight: float = 6.0,
+        mobility_weight: float = 3.0,
+        center_weight: float = 2.0,
+        tropism_weight: float = 2.0,
+        threat_weight: float = 2.5,
+        max_check_extensions: int = 2,
+        max_sacrifice_extensions: int = 2,
+    ) -> None:
+        self.max_depth = max_depth
+        self.time_limit = time_limit
+        self.sacrifice_bias = sacrifice_bias
+        self.attack_weight = attack_weight
+        self.king_safety_weight = king_safety_weight
+        self.mobility_weight = mobility_weight
+        self.center_weight = center_weight
+        self.tropism_weight = tropism_weight
+        self.threat_weight = threat_weight
+        self.max_check_extensions = max(0, max_check_extensions)
+        self.max_sacrifice_extensions = max(0, max_sacrifice_extensions)
+        self.neural_evaluator = NeuralEvaluator()
+
+        # Persistent learning tables that survive between moves so iterative
+        # searches can re-use knowledge gathered from previous iterations.
+        self._transposition_table: Dict[int, TTEntry] = {}
+        self._history_table: Dict[Tuple[int, int], int] = {}
+        self._countermove_table: Dict[Tuple[int, int], chess.Move] = {}
+        self._capture_history_table: Dict[Tuple[int, int], int] = {}
+        self._eval_cache_table: Dict[int, int] = {}
+
+        # Size limits keep the auxiliary tables bounded so long-running games
+        # do not accumulate unbounded state.
+        self.transposition_limit = 250_000
+        self.eval_cache_limit = 120_000
+        self.history_limit = 12_000
+        self.capture_history_limit = 12_000
+        self.countermove_limit = 4_096
+
+    def _age_transposition(self, state: SearchState) -> None:
+        """Drop stale transposition entries so the table stays relevant."""
+
+        if not state.transposition:
+            return
+        max_age = 4
+        stale_keys = [
+            key
+            for key, entry in state.transposition.items()
+            if state.generation - entry.generation > max_age
+        ]
+        for key in stale_keys:
+            state.transposition.pop(key, None)
+
+    def _store_transposition(
+        self,
+        key: int,
+        entry: TTEntry,
+        state: SearchState,
+    ) -> None:
+        existing = state.transposition.get(key)
+        replaced = False
+        if existing is None:
+            state.transposition[key] = entry
+            replaced = True
+        elif entry.depth > existing.depth:
+            state.transposition[key] = entry
+            replaced = True
+        elif entry.depth == existing.depth and entry.generation >= existing.generation:
+            state.transposition[key] = entry
+            replaced = True
+        if replaced:
+            self._enforce_transposition_limit(state.transposition)
+
+    def _fetch_transposition(self, key: int, state: SearchState) -> Optional[TTEntry]:
+        entry = state.transposition.get(key)
+        if entry is None:
+            return None
+        if state.generation - entry.generation > 5:
+            return None
+        return entry
+
+    def _decay_learning_tables(self) -> None:
+        """Lightly decay history-style tables to keep values bounded."""
+
+        decay = 0.875
+        for table in (self._history_table, self._capture_history_table):
+            for key, value in list(table.items()):
+                new_value = int(value * decay)
+                if new_value == 0:
+                    table.pop(key, None)
+                else:
+                    table[key] = new_value
+
+    def _enforce_transposition_limit(self, table: Dict[int, TTEntry]) -> None:
+        if self.transposition_limit <= 0:
+            return
+        excess = len(table) - self.transposition_limit
+        if excess <= 0:
+            return
+        stale = sorted(
+            table.items(),
+            key=lambda item: (item[1].generation, item[1].depth),
+        )
+        for key, _ in stale[:excess]:
+            table.pop(key, None)
+
+    def _enforce_eval_cache_limit(self, cache: Dict[int, int]) -> None:
+        if self.eval_cache_limit <= 0:
+            return
+        excess = len(cache) - self.eval_cache_limit
+        if excess <= 0:
+            return
+        for _ in range(excess):
+            try:
+                oldest_key = next(iter(cache))
+            except StopIteration:
+                break
+            cache.pop(oldest_key, None)
+
+    def _enforce_history_limit(self, table: Dict[Tuple[int, int], int]) -> None:
+        if self.history_limit <= 0:
+            return
+        excess = len(table) - self.history_limit
+        if excess <= 0:
+            return
+        weakest = sorted(table.items(), key=lambda item: abs(item[1]))[:excess]
+        for key, _ in weakest:
+            table.pop(key, None)
+
+    def _enforce_capture_history_limit(
+        self, table: Dict[Tuple[int, int], int]
+    ) -> None:
+        if self.capture_history_limit <= 0:
+            return
+        excess = len(table) - self.capture_history_limit
+        if excess <= 0:
+            return
+        weakest = sorted(table.items(), key=lambda item: abs(item[1]))[:excess]
+        for key, _ in weakest:
+            table.pop(key, None)
+
+    def _enforce_countermove_limit(
+        self, table: Dict[Tuple[int, int], chess.Move]
+    ) -> None:
+        if self.countermove_limit <= 0:
+            return
+        excess = len(table) - self.countermove_limit
+        for _ in range(excess):
+            try:
+                oldest_key = next(iter(table))
+            except StopIteration:
+                break
+            table.pop(oldest_key, None)
+
+    def _record_countermove(
+        self,
+        previous_move: chess.Move,
+        reply_move: chess.Move,
+        state: SearchState,
+    ) -> None:
+        key = (previous_move.from_square, previous_move.to_square)
+        if key in state.countermoves:
+            state.countermoves.pop(key, None)
+        state.countermoves[key] = reply_move
+        self._enforce_countermove_limit(state.countermoves)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def choose_move(
+        self,
+        board: chess.Board,
+        time_limit: Optional[float] = None,
+        max_depth: Optional[int] = None,
+    ) -> chess.Move:
+        """Return the best move according to the TalBot engine."""
+
+        limit = self.time_limit if time_limit is None else time_limit
+        depth_cap = self.max_depth if max_depth is None else max_depth
+        self._decay_learning_tables()
+        state = SearchState(
+            start_time=time.time(),
+            time_limit=limit,
+            transposition=self._transposition_table,
+            history=self._history_table,
+            countermoves=self._countermove_table,
+            capture_history=self._capture_history_table,
+            eval_cache=self._eval_cache_table,
+        )
+
+        best_move: Optional[chess.Move] = None
+        best_value = -math.inf
+        aspiration = 50
+
+        for depth in range(1, depth_cap + 1):
+            state.generation = depth
+            self._age_transposition(state)
+            if state.time_exceeded():
+                break
+
+            alpha = -MATE_SCORE
+            beta = MATE_SCORE
+            window = aspiration
+            if best_value not in (-math.inf, math.inf):
+                alpha = max(alpha, int(best_value) - window)
+                beta = min(beta, int(best_value) + window)
+
+            while True:
+                value, move = self._search_root(board, depth, alpha, beta, state, best_move)
+
+                if state.time_exceeded():
+                    break
+
+                if value <= alpha and alpha > -MATE_SCORE:
+                    alpha = max(-MATE_SCORE, alpha - max(50, window * 2))
+                    continue
+                if value >= beta and beta < MATE_SCORE:
+                    beta = min(MATE_SCORE, beta + max(50, window * 2))
+                    continue
+                break
+
+            if state.time_exceeded():
+                break
+
+            if move is not None:
+                best_move = move
+                best_value = value
+
+            aspiration = max(25, aspiration // 2)
+
+        self._transposition_table = state.transposition
+        self._history_table = state.history
+        self._countermove_table = state.countermoves
+        self._capture_history_table = state.capture_history
+        self._eval_cache_table = state.eval_cache
+
+        if best_move is None:
+            try:
+                return next(board.legal_moves)
+            except StopIteration as exc:  # pragma: no cover
+                raise ValueError("No legal moves available") from exc
+        return best_move
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+    def _search_root(
+        self,
+        board: chess.Board,
+        depth: int,
+        alpha: int,
+        beta: int,
+        state: SearchState,
+        pv_hint: Optional[chess.Move],
+    ) -> Tuple[int, Optional[chess.Move]]:
+        best_value = -MATE_SCORE
+        best_move: Optional[chess.Move] = None
+
+        key = self._hash(board)
+        tt_entry = self._fetch_transposition(key, state)
+        hash_move = pv_hint or (tt_entry.move if tt_entry else None)
+        moves = self._order_moves(board, 0, hash_move, state, None)
+
+        if not moves:
+            if board.is_checkmate():
+                return -MATE_SCORE + depth, None
+            return 0, None
+
+        root_eval: Optional[int] = None
+        if not board.is_check():
+            root_eval = self._evaluate_cached(board, state)
+
+        for move in moves:
+            if state.time_exceeded():
+                break
+            board.push(move)
+            value = -self._pv_search(
+                board,
+                depth - 1,
+                -beta,
+                -alpha,
+                state,
+                1,
+                root_eval,
+                0,
+                0,
+                move,
+            )
+            board.pop()
+
+            if state.time_exceeded():
+                break
+
+            if value > best_value:
+                best_value = value
+                best_move = move
+            if best_value > alpha:
+                alpha = best_value
+            if alpha >= beta:
+                break
+
+        if best_move is not None:
+            self._store_transposition(
+                key,
+                TTEntry(depth, best_value, "exact", best_move, state.generation),
+                state,
+            )
+        return best_value, best_move
+
+    def _pv_search(
+        self,
+        board: chess.Board,
+        depth: int,
+        alpha: int,
+        beta: int,
+        state: SearchState,
+        ply: int,
+        parent_eval: Optional[int],
+        check_extensions: int,
+        sacrifice_extensions: int,
+        previous_move: Optional[chess.Move],
+    ) -> int:
+        if state.time_exceeded():
+            return 0
+        if ply >= MAX_PLY:
+            return self._evaluate_cached(board, state)
+
+        alpha = max(alpha, -MATE_SCORE + ply)
+        beta = min(beta, MATE_SCORE - ply)
+        if alpha >= beta:
+            return alpha
+
+        if board.is_fivefold_repetition() or board.is_repetition(3):
+            return 0
+        if board.can_claim_draw() and not board.is_check():
+            return 0
+
+        key = self._hash(board)
+        entry = self._fetch_transposition(key, state)
+        if entry and entry.depth >= depth:
+            if entry.flag == "exact":
+                return entry.value
+            if entry.flag == "lower" and entry.value > alpha:
+                alpha = entry.value
+            elif entry.flag == "upper" and entry.value < beta:
+                beta = entry.value
+            if alpha >= beta:
+                return entry.value
+
+        alpha_orig = alpha
+        in_check = board.is_check()
+        if in_check:
+            depth += 1
+
+        if depth <= 0:
+            return self._quiescence(board, alpha, beta, state, ply)
+
+        if board.is_checkmate():
+            return -MATE_SCORE + ply
+        if board.is_stalemate() or board.is_insufficient_material():
+            return 0
+
+        state.nodes += 1
+
+        current_static: Optional[int] = None
+
+        def ensure_static() -> Optional[int]:
+            nonlocal current_static
+            if current_static is None and not in_check:
+                current_static = self._evaluate_cached(board, state)
+            return current_static
+
+        improving = False
+        if not in_check:
+            ensure_static()
+            if current_static is not None:
+                if parent_eval is None:
+                    improving = True
+                else:
+                    improving = current_static >= parent_eval - 25
+
+        tt_move = entry.move if entry else None
+        if (
+            depth >= 4
+            and tt_move is None
+            and not in_check
+            and not state.time_exceeded()
+        ):
+            self._pv_search(
+                board,
+                depth - 2,
+                alpha,
+                beta,
+                state,
+                ply,
+                parent_eval,
+                check_extensions,
+                sacrifice_extensions,
+                previous_move,
+            )
+            refreshed = self._fetch_transposition(key, state)
+            if refreshed:
+                tt_move = refreshed.move
+
+        # Null move pruning
+        if depth >= 3 and not in_check and self._can_null_move(board):
+            parent_static_for_children = ensure_static()
+            board.push(chess.Move.null())
+            null_score = -self._pv_search(
+                board,
+                depth - 1 - 2,
+                -beta,
+                -beta + 1,
+                state,
+                ply + 1,
+                parent_static_for_children,
+                0,
+                0,
+                None,
+            )
+            board.pop()
+            if null_score >= beta:
+                return beta
+
+        moves = self._order_moves(board, ply, tt_move, state, previous_move)
+        if not moves:
+            if in_check:
+                return -MATE_SCORE + ply
+            return ensure_static() or self._evaluate_cached(board, state)
+
+        best_value = -MATE_SCORE
+        best_move: Optional[chess.Move] = None
+
+        quiet_count = 0
+
+        for index, move in enumerate(moves):
+            if state.time_exceeded():
+                break
+
+            is_capture = board.is_capture(move)
+            is_sacrifice_move = self._is_sacrifice(board, move)
+            history_score = state.history.get((move.from_square, move.to_square), 0)
+            attacker_piece = board.piece_at(move.from_square)
+            attacker_type = attacker_piece.piece_type if attacker_piece else 0
+            victim_piece = board.piece_at(move.to_square)
+            if victim_piece is None and board.is_en_passant(move):
+                victim_type = chess.PAWN
+            else:
+                victim_type = victim_piece.piece_type if victim_piece else 0
+
+            board.push(move)
+
+            gives_check = board.is_check()
+            next_check_extensions = check_extensions + 1 if gives_check else 0
+            next_sacrifice_extensions = sacrifice_extensions + 1 if is_sacrifice_move else 0
+
+            if (
+                current_static is not None
+                and depth <= 2
+                and index > 6
+                and not is_capture
+                and not gives_check
+                and move.promotion is None
+            ):
+                futility_margin = 120 + 60 * depth
+                if current_static + futility_margin <= alpha:
+                    board.pop()
+                    continue
+
+            reduction = 0
+            if (
+                depth >= 3
+                and index >= 3
+                and not is_capture
+                and not gives_check
+                and move.promotion is None
+            ):
+                base = math.log(depth) * math.log(index + 1)
+                reduction = int(base / 1.7)
+                if improving:
+                    reduction = max(0, reduction - 1)
+                if history_score > 1500:
+                    reduction = max(0, reduction - 1)
+                elif history_score < 0 and reduction < depth - 1:
+                    reduction += 1
+                if not improving and reduction < depth - 1:
+                    reduction += 1
+                reduction = min(reduction, depth - 1)
+
+            extension = 1 if gives_check and depth > 1 and next_check_extensions <= self.max_check_extensions else 0
+            sacrifice_extension = (
+                1
+                if (
+                    is_sacrifice_move
+                    and depth > 1
+                    and sacrifice_extensions < self.max_sacrifice_extensions
+                )
+                else 0
+            )
+            new_depth = depth - 1 + extension + sacrifice_extension
+            if new_depth < 0:
+                new_depth = 0
+
+            quiet = not is_capture and not gives_check and move.promotion is None
+            if quiet:
+                quiet_count += 1
+                if (
+                    depth <= 2
+                    and quiet_count > 6
+                    and not improving
+                    and current_static is not None
+                    and current_static + 90 * depth + 20 * quiet_count <= alpha
+                ):
+                    board.pop()
+                    continue
+
+            if (
+                new_depth <= 2
+                and quiet
+                and not in_check
+            ):
+                static_eval = self._evaluate_cached(board, state)
+                futility_margin = 150 + 100 * new_depth
+                if static_eval + futility_margin <= alpha:
+                    board.pop()
+                    continue
+
+            if index == 0:
+                score = -self._pv_search(
+                    board,
+                    new_depth,
+                    -beta,
+                    -alpha,
+                    state,
+                    ply + 1,
+                    current_static,
+                    next_check_extensions,
+                    next_sacrifice_extensions,
+                    move,
+                )
+            else:
+                score = -self._pv_search(
+                    board,
+                    max(0, new_depth - reduction),
+                    -alpha - 1,
+                    -alpha,
+                    state,
+                    ply + 1,
+                    current_static,
+                    next_check_extensions,
+                    next_sacrifice_extensions,
+                    move,
+                )
+                if score > alpha:
+                    score = -self._pv_search(
+                        board,
+                        new_depth,
+                        -beta,
+                        -alpha,
+                        state,
+                        ply + 1,
+                        current_static,
+                        next_check_extensions,
+                        next_sacrifice_extensions,
+                        move,
+                    )
+
+            board.pop()
+
+            if state.time_exceeded():
+                break
+
+            if score > best_value:
+                best_value = score
+                best_move = move
+            if score > alpha:
+                alpha = score
+                if not is_capture:
+                    self._update_history(move, depth, state)
+                else:
+                    self._update_capture_history(attacker_type, victim_type, depth, state, True)
+                if previous_move is not None and score > alpha_orig:
+                    self._record_countermove(previous_move, move, state)
+            else:
+                if is_capture:
+                    self._update_capture_history(attacker_type, victim_type, depth, state, False)
+                else:
+                    key_hist = (move.from_square, move.to_square)
+                    penalty = depth * depth
+                    new_score = state.history.get(key_hist, 0) - penalty
+                    if new_score <= 0:
+                        state.history.pop(key_hist, None)
+                    else:
+                        state.history[key_hist] = new_score
+
+            if score >= beta:
+                if not is_capture:
+                    self._store_killer(move, ply, state)
+                    self._update_history(move, depth, state)
+                if previous_move is not None:
+                    self._record_countermove(previous_move, move, state)
+                break
+
+            if alpha >= beta:
+                if not is_capture:
+                    self._store_killer(move, ply, state)
+                    self._update_history(move, depth, state)
+                break
+
+        if best_move is None:
+            return ensure_static() or self._evaluate_cached(board, state)
+
+        flag = "exact"
+        if best_value <= alpha_orig:
+            flag = "upper"
+        elif best_value >= beta:
+            flag = "lower"
+
+        self._store_transposition(
+            key,
+            TTEntry(depth, best_value, flag, best_move, state.generation),
+            state,
+        )
+        return best_value
+
+    def _quiescence(
+        self,
+        board: chess.Board,
+        alpha: int,
+        beta: int,
+        state: SearchState,
+        ply: int,
+    ) -> int:
+        if ply >= MAX_PLY:
+            return self._evaluate_cached(board, state)
+        if board.is_fivefold_repetition() or board.is_repetition(3):
+            return 0
+        if board.can_claim_draw() and not board.is_check():
+            return 0
+        stand_pat = self._evaluate_cached(board, state)
+        if stand_pat >= beta:
+            return beta
+        if stand_pat > alpha:
+            alpha = stand_pat
+
+        captures = list(self._generate_tactical_moves(board))
+        for move in captures:
+            if state.time_exceeded():
+                break
+            delta_margin = 0
+            if board.is_capture(move):
+                victim = board.piece_at(move.to_square)
+                if victim is not None:
+                    delta_margin = PIECE_VALUES.get(victim.piece_type, 0)
+                elif board.is_en_passant(move):
+                    delta_margin = PIECE_VALUES[chess.PAWN]
+            else:
+                delta_margin = PIECE_VALUES[chess.QUEEN] // 2
+            if stand_pat + delta_margin + 200 < alpha:
+                continue
+            board.push(move)
+            score = -self._quiescence(board, -beta, -alpha, state, ply + 1)
+            board.pop()
+
+            if score >= beta:
+                return beta
+            if score > alpha:
+                alpha = score
+        return alpha
+
+    # ------------------------------------------------------------------
+    # Move ordering and helpers
+    # ------------------------------------------------------------------
+    def _order_moves(
+        self,
+        board: chess.Board,
+        ply: int,
+        hash_move: Optional[chess.Move],
+        state: SearchState,
+        previous_move: Optional[chess.Move],
+    ) -> List[chess.Move]:
+        killers = state.killers.get(ply, [])
+        counter_move: Optional[chess.Move] = None
+        if previous_move is not None:
+            counter_move = state.countermoves.get(
+                (previous_move.from_square, previous_move.to_square)
+            )
+
+        moves = list(board.legal_moves)
+
+        def move_score(move: chess.Move, order_index: int) -> int:
+            if move == hash_move:
+                return 1_000_000
+            if counter_move is not None and move == counter_move:
+                return 900_000 - order_index
+            if board.is_capture(move):
+                victim = board.piece_at(move.to_square)
+                attacker = board.piece_at(move.from_square)
+                victim_val = 0 if victim is None else PIECE_VALUES.get(victim.piece_type, 0)
+                attacker_val = 0 if attacker is None else PIECE_VALUES.get(attacker.piece_type, 0)
+                if victim is None and board.is_en_passant(move):
+                    victim_val = PIECE_VALUES[chess.PAWN]
+                attacker_type = attacker.piece_type if attacker else 0
+                victim_type = victim.piece_type if victim else (
+                    chess.PAWN if board.is_en_passant(move) else 0
+                )
+                capture_bonus = state.capture_history.get((attacker_type, victim_type), 0)
+                return (
+                    600_000
+                    + 100 * victim_val
+                    - attacker_val
+                    - 15 * order_index
+                    + capture_bonus
+                )
+            if move in killers:
+                return 450_000 - killers.index(move) * 1_000
+            history_score = state.history.get((move.from_square, move.to_square), 0)
+            if move.promotion:
+                history_score += 10_000
+            if self._gives_check(board, move):
+                history_score += 5_000
+            return history_score
+
+        scored: List[Tuple[int, chess.Move]] = []
+        for idx, mv in enumerate(moves):
+            scored.append((move_score(mv, idx), mv))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [mv for _, mv in scored]
+
+    def _generate_tactical_moves(self, board: chess.Board) -> Iterable[chess.Move]:
+        moves = list(board.legal_moves)
+        for move in moves:
+            gives_check = self._gives_check(board, move)
+            if board.is_capture(move) or gives_check or move.promotion is not None:
+                if self._see_ge(board, move, 0):
+                    yield move
+
+    def _see_ge(self, board: chess.Board, move: chess.Move, threshold: int) -> bool:
+        see = getattr(board, "see", None)
+        if callable(see):
+            return see(move, threshold=threshold)
+        # Fallback: optimistic MVV-LVA estimate.
+        victim = board.piece_at(move.to_square)
+        attacker = board.piece_at(move.from_square)
+        victim_val = PIECE_VALUES.get(victim.piece_type, 0) if victim else 0
+        attacker_val = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
+        return victim_val - attacker_val >= threshold
+
+    def _is_sacrifice(self, board: chess.Board, move: chess.Move) -> bool:
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            return False
+        mover_value = PIECE_VALUES.get(piece.piece_type, 0)
+        if mover_value <= PIECE_VALUES[chess.PAWN]:
+            return False
+
+        capture = board.piece_at(move.to_square)
+        capture_value = PIECE_VALUES.get(capture.piece_type, 0) if capture else 0
+
+        see = getattr(board, "see", None)
+        if callable(see):
+            swing = see(move)
+        else:
+            swing = capture_value - mover_value
+
+        margin = max(60, mover_value // 2)
+        if capture:
+            margin = max(40, mover_value - capture_value)
+        if swing < -margin:
+            return True
+
+        if capture:
+            return False
+
+        board.push(move)
+        try:
+            enemy = not piece.color
+            attackers = board.attackers(enemy, move.to_square)
+            if not attackers:
+                return False
+            defenders = board.attackers(piece.color, move.to_square)
+            if len(defenders) >= len(attackers):
+                return False
+            min_attacker_value = min(
+                (
+                    PIECE_VALUES.get(board.piece_at(sq).piece_type, mover_value)
+                    for sq in attackers
+                    if board.piece_at(sq) is not None
+                ),
+                default=mover_value,
+            )
+            return min_attacker_value + 30 < mover_value
+        finally:
+            board.pop()
+
+    def _gives_check(self, board: chess.Board, move: chess.Move) -> bool:
+        pushed = False
+        try:
+            board.push(move)
+            pushed = True
+            return board.is_check()
+        except Exception:
+            analysis = board.copy(stack=False)
+            try:
+                analysis.push(move)
+            except Exception:
+                return False
+            return analysis.is_check()
+        finally:
+            if pushed:
+                board.pop()
+
+    def _store_killer(self, move: chess.Move, ply: int, state: SearchState) -> None:
+        killers = state.killers.setdefault(ply, [])
+        if move in killers:
+            return
+        killers.insert(0, move)
+        if len(killers) > 2:
+            killers.pop()
+
+    def _update_history(self, move: chess.Move, depth: int, state: SearchState) -> None:
+        key = (move.from_square, move.to_square)
+        bonus = depth * depth
+        value = state.history.get(key, 0) + bonus
+        value = max(-50_000, min(50_000, value))
+        if key in state.history:
+            state.history.pop(key, None)
+        state.history[key] = value
+        self._enforce_history_limit(state.history)
+
+    def _update_capture_history(
+        self,
+        attacker_type: int,
+        victim_type: int,
+        depth: int,
+        state: SearchState,
+        success: bool,
+    ) -> None:
+        if attacker_type <= 0:
+            return
+        key = (attacker_type, victim_type)
+        delta = depth * depth
+        if not success:
+            delta = -max(1, delta // 2)
+        value = state.capture_history.get(key, 0) + delta
+        value = max(-5_000, min(5_000, value))
+        if key in state.capture_history:
+            state.capture_history.pop(key, None)
+        state.capture_history[key] = value
+        self._enforce_capture_history_limit(state.capture_history)
+
+    def _can_null_move(self, board: chess.Board) -> bool:
+        if board.turn == chess.WHITE:
+            material = sum(PIECE_VALUES[p.piece_type] for p in board.piece_map().values() if p.color == chess.WHITE)
+        else:
+            material = sum(PIECE_VALUES[p.piece_type] for p in board.piece_map().values() if p.color == chess.BLACK)
+        return material - PIECE_VALUES[chess.PAWN] > 0
+
+    def _hash(self, board: chess.Board) -> int:
+        for attr in ("zobrist_hash", "transposition_key", "_transposition_key"):
+            method = getattr(board, attr, None)
+            if callable(method):
+                return method()
+        return hash(board.fen())
+
+    # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
+    def _evaluate_cached(self, board: chess.Board, state: SearchState) -> int:
+        """Return a cached static evaluation for the given board."""
+
+        key = hash(
+            (
+                self._hash(board),
+                board.turn,
+                board.castling_rights,
+                board.ep_square if board.ep_square is not None else -1,
+                board.halfmove_clock,
+            )
+        )
+        cached = state.eval_cache.get(key)
+        if cached is not None:
+            return cached
+
+        score = self._evaluate(board)
+        if key in state.eval_cache:
+            state.eval_cache.pop(key, None)
+        state.eval_cache[key] = score
+        self._enforce_eval_cache_limit(state.eval_cache)
+        return score
+
+    def _evaluate(self, board: chess.Board) -> int:
+        if board.is_checkmate():
+            return -MATE_SCORE
+        if board.is_stalemate() or board.is_insufficient_material():
+            return 0
+
+        material = self._material_balance(board)
+        pst = self._piece_square(board)
+        mobility_raw = self._mobility(board)
+        mobility_score = mobility_raw * self.mobility_weight
+        king_safety_white, king_safety_black = self._king_safety(board)
+        king_white_score = king_safety_white * self.king_safety_weight
+        king_black_score = king_safety_black * self.king_safety_weight
+        attack_white, attack_black = self._attack_pressure(board)
+        attack_white_score = attack_white * self.attack_weight
+        attack_black_score = attack_black * self.attack_weight
+        pawn_structure = self._pawn_structure(board)
+        rook_activity = self._rook_activity(board)
+        bishop_pair = self._bishop_pair(board)
+        center_raw = self._center_control(board)
+        center_score = center_raw * self.center_weight
+        threats_raw = self._threat_map(board)
+        threats_score = threats_raw * self.threat_weight
+        tropism_white, tropism_black = self._king_tropism(board)
+        tropism_delta = tropism_white - tropism_black
+        tropism_score = tropism_delta * self.tropism_weight
+        sacrifice_raw = self._sacrifice_bias_eval(
+            board,
+            material_white=self._material_total(board, chess.WHITE),
+            material_black=self._material_total(board, chess.BLACK),
+            attack_white=attack_white,
+            attack_black=attack_black,
+            king_white=king_safety_white,
+            king_black=king_safety_black,
+            threats=threats_raw,
+            center=center_raw,
+            tropism_white=tropism_white,
+            tropism_black=tropism_black,
+        )
+
+        tempo_signal = 1.0 if board.turn == chess.WHITE else -1.0
+        phase = self._phase(board)
+        sacrifice_signal = sacrifice_raw if board.turn == chess.WHITE else -sacrifice_raw
+
+        initiative_score = (
+            (attack_white_score - attack_black_score)
+            + max(0.0, -float(king_black_score))
+            - max(0.0, -float(king_white_score))
+            + center_score
+            + threats_score
+            + tropism_score
+        )
+
+        features = {
+            "material": float(material) / 1000.0,
+            "pst": float(pst) / 800.0,
+            "mobility": float(mobility_score) / 150.0,
+            "king_delta": float(king_white_score - king_black_score) / 400.0,
+            "king_white": float(king_white_score) / 400.0,
+            "king_black": -float(king_black_score) / 400.0,
+            "attack_delta": float(attack_white_score - attack_black_score) / 300.0,
+            "attack_white": float(attack_white_score) / 300.0,
+            "attack_black": -float(attack_black_score) / 300.0,
+            "pawn_structure": float(pawn_structure) / 200.0,
+            "rook_activity": float(rook_activity) / 120.0,
+            "bishop_pair": float(bishop_pair) / 60.0,
+            "center": float(center_score) / 80.0,
+            "threats": float(threats_score) / 120.0,
+            "tropism": float(tropism_score) / 140.0,
+            "tempo": tempo_signal,
+            "phase": phase,
+            "sacrifice": float(sacrifice_signal) / 150.0,
+            "initiative": float(initiative_score) / 400.0,
+        }
+
+        score = self.neural_evaluator.evaluate(features)
+        score = max(-MATE_THRESHOLD, min(MATE_THRESHOLD, score))
+        return int(score) if board.turn == chess.WHITE else int(-score)
+
+    def _material_balance(self, board: chess.Board) -> int:
+        score = 0
+        for piece_type, value in PIECE_VALUES.items():
+            score += value * (len(board.pieces(piece_type, chess.WHITE)) - len(board.pieces(piece_type, chess.BLACK)))
+        return score
+
+    def _material_total(self, board: chess.Board, color: chess.Color) -> int:
+        total = 0
+        for piece_type, value in PIECE_VALUES.items():
+            total += value * len(board.pieces(piece_type, color))
+        return total
+
+    def _piece_square(self, board: chess.Board) -> int:
+        score = 0
+        for piece_type, table in PIECE_SQUARE_TABLES.items():
+            for square in board.pieces(piece_type, chess.WHITE):
+                score += table[square]
+            for square in board.pieces(piece_type, chess.BLACK):
+                score -= table[chess.square_mirror(square)]
+
+        phase = self._phase(board)
+        king_table = [
+            int(phase * mid + (1 - phase) * end)
+            for mid, end in zip(KING_MIDDLEGAME, KING_ENDGAME)
+        ]
+        for square in board.pieces(chess.KING, chess.WHITE):
+            score += king_table[square]
+        for square in board.pieces(chess.KING, chess.BLACK):
+            score -= king_table[chess.square_mirror(square)]
+        return score
+
+    def _phase(self, board: chess.Board) -> float:
+        phase_weights = {
+            chess.PAWN: 0,
+            chess.KNIGHT: 1,
+            chess.BISHOP: 1,
+            chess.ROOK: 2,
+            chess.QUEEN: 4,
+            chess.KING: 0,
+        }
+        total = sum(phase_weights[p.piece_type] for p in board.piece_map().values())
+        return min(1.0, total / 24.0)
+
+    def _mobility(self, board: chess.Board) -> int:
+        white_attacks = 0
+        black_attacks = 0
+        for square, piece in board.piece_map().items():
+            attack_count = len(board.attacks(square))
+            if piece.color == chess.WHITE:
+                white_attacks += attack_count
+            else:
+                black_attacks += attack_count
+        return white_attacks - black_attacks
+
+    def _pawn_structure(self, board: chess.Board) -> int:
+        score = 0
+        white_files = [0] * 8
+        black_files = [0] * 8
+        for square in board.pieces(chess.PAWN, chess.WHITE):
+            white_files[chess.square_file(square)] += 1
+        for square in board.pieces(chess.PAWN, chess.BLACK):
+            black_files[chess.square_file(square)] += 1
+
+        def is_passed(square: int, color: chess.Color) -> bool:
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            direction = 1 if color == chess.WHITE else -1
+            enemy = chess.BLACK if color == chess.WHITE else chess.WHITE
+            r = rank + direction
+            while 0 <= r < 8:
+                for df in (-1, 0, 1):
+                    file_sq = file + df
+                    if not 0 <= file_sq < 8:
+                        continue
+                    sq = chess.square(file_sq, r)
+                    piece = board.piece_at(sq)
+                    if piece and piece.color == enemy and piece.piece_type == chess.PAWN:
+                        return False
+                r += direction
+            return True
+
+        for square in board.pieces(chess.PAWN, chess.WHITE):
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            if white_files[file] > 1:
+                score -= DOUBLED_PAWN_PENALTY
+            neighbors = []
+            if file > 0:
+                neighbors.append(white_files[file - 1])
+            if file < 7:
+                neighbors.append(white_files[file + 1])
+            if neighbors and all(count == 0 for count in neighbors):
+                score -= ISOLATED_PAWN_PENALTY
+            if is_passed(square, chess.WHITE):
+                score += PASSED_PAWN_BONUS[rank]
+
+        for square in board.pieces(chess.PAWN, chess.BLACK):
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            if black_files[file] > 1:
+                score += DOUBLED_PAWN_PENALTY
+            neighbors = []
+            if file > 0:
+                neighbors.append(black_files[file - 1])
+            if file < 7:
+                neighbors.append(black_files[file + 1])
+            if neighbors and all(count == 0 for count in neighbors):
+                score += ISOLATED_PAWN_PENALTY
+            if is_passed(square, chess.BLACK):
+                score -= PASSED_PAWN_BONUS[7 - rank]
+
+        return score
+
+    def _rook_activity(self, board: chess.Board) -> int:
+        score = 0
+        for color in (chess.WHITE, chess.BLACK):
+            for square in board.pieces(chess.ROOK, color):
+                file = chess.square_file(square)
+                file_mask = chess.BB_FILES[file]
+                friendly_pawns = board.pieces(chess.PAWN, color) & file_mask
+                enemy_pawns = board.pieces(chess.PAWN, not color) & file_mask
+                bonus = 0
+                if not friendly_pawns and not enemy_pawns:
+                    bonus = ROOK_OPEN_FILE_BONUS
+                elif not friendly_pawns:
+                    bonus = ROOK_SEMI_OPEN_FILE_BONUS
+                score += bonus if color == chess.WHITE else -bonus
+        return score
+
+    def _bishop_pair(self, board: chess.Board) -> int:
+        score = 0
+        if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+            score += BISHOP_PAIR_BONUS
+        if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+            score -= BISHOP_PAIR_BONUS
+        return score
+
+    def _center_control(self, board: chess.Board) -> int:
+        score = 0
+        for square in EXTENDED_CENTER:
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            bonus = 12 if square in CENTER_SQUARES else 6
+            if piece.color == chess.WHITE:
+                score += bonus
+            else:
+                score -= bonus
+
+        for square in CENTER_SQUARES:
+            white_attackers = len(board.attackers(chess.WHITE, square))
+            black_attackers = len(board.attackers(chess.BLACK, square))
+            score += 4 * (white_attackers - black_attackers)
+        return score
+
+    def _king_tropism(self, board: chess.Board) -> Tuple[int, int]:
+        def tropism(color: chess.Color) -> int:
+            enemy_king = board.king(not color)
+            if enemy_king is None:
+                return 0
+            enemy_file = chess.square_file(enemy_king)
+            enemy_rank = chess.square_rank(enemy_king)
+            pressure = 0
+            for square in board.pieces(chess.PAWN, color):
+                file_diff = abs(chess.square_file(square) - enemy_file)
+                rank_diff = abs(chess.square_rank(square) - enemy_rank)
+                if rank_diff < 3 and file_diff <= 1:
+                    pressure += 2
+            for square, piece in board.piece_map().items():
+                if piece.color != color or piece.piece_type not in TROPISM_PIECES:
+                    continue
+                distance = abs(chess.square_file(square) - enemy_file) + abs(
+                    chess.square_rank(square) - enemy_rank
+                )
+                pressure += max(0, TROPISM_PIECES[piece.piece_type] - 3 * distance)
+            return pressure
+
+        return tropism(chess.WHITE), tropism(chess.BLACK)
+
+    def _threat_map(self, board: chess.Board) -> int:
+        score = 0
+        for square, piece in board.piece_map().items():
+            enemy = not piece.color
+            attackers = len(board.attackers(enemy, square))
+            defenders = len(board.attackers(piece.color, square))
+            value = PIECE_VALUES.get(piece.piece_type, 0)
+            if attackers > defenders:
+                swing = min(attackers - defenders, 2)
+                penalty = (value * swing) // 4 + 6
+                score += -penalty if piece.color == chess.WHITE else penalty
+
+        for square in chess.SquareSet(board.occupied_co[chess.BLACK]):
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            attackers = len(board.attackers(chess.WHITE, square))
+            defenders = len(board.attackers(chess.BLACK, square))
+            if attackers > defenders:
+                gain = PIECE_VALUES.get(piece.piece_type, 0) // 6 + 8
+                score += gain
+
+        for square in chess.SquareSet(board.occupied_co[chess.WHITE]):
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            attackers = len(board.attackers(chess.BLACK, square))
+            defenders = len(board.attackers(chess.WHITE, square))
+            if attackers > defenders:
+                gain = PIECE_VALUES.get(piece.piece_type, 0) // 6 + 8
+                score -= gain
+        return score
+
+    def _king_safety(self, board: chess.Board) -> Tuple[int, int]:
+        def score(color: chess.Color) -> int:
+            king_square = board.king(color)
+            if king_square is None:
+                return -MATE_THRESHOLD
+            file = chess.square_file(king_square)
+            rank = chess.square_rank(king_square)
+            shelter = 0
+            direction = 1 if color == chess.WHITE else -1
+            for df in (-1, 0, 1):
+                file_sq = file + df
+                if not 0 <= file_sq < 8:
+                    continue
+                defended = False
+                for step in range(1, 3):
+                    rank_sq = rank + step * direction
+                    if not 0 <= rank_sq < 8:
+                        break
+                    sq = chess.square(file_sq, rank_sq)
+                    piece = board.piece_at(sq)
+                    if piece and piece.color == color and piece.piece_type == chess.PAWN:
+                        shelter += 12 // step
+                        defended = True
+                        break
+                if not defended:
+                    shelter -= 10
+
+            attackers = len(board.attackers(not color, king_square))
+
+            open_files = 0
+            for df in (-1, 0, 1):
+                file_sq = file + df
+                if not 0 <= file_sq < 8:
+                    continue
+                clear = True
+                file_range = range(rank + 1, 8) if color == chess.WHITE else range(0, rank)
+                for r in file_range:
+                    sq = chess.square(file_sq, r)
+                    piece = board.piece_at(sq)
+                    if piece:
+                        clear = False
+                        break
+                if clear:
+                    open_files += 1
+            return shelter - 8 * attackers - 6 * open_files
+
+        return score(chess.WHITE), score(chess.BLACK)
+
+    def _attack_pressure(self, board: chess.Board) -> Tuple[int, int]:
+        king_ring_offsets = [
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1),
+        ]
+
+        def ring_squares(square: int) -> List[int]:
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            result: List[int] = []
+            for df, dr in king_ring_offsets:
+                file_sq = file + df
+                rank_sq = rank + dr
+                if 0 <= file_sq < 8 and 0 <= rank_sq < 8:
+                    result.append(chess.square(file_sq, rank_sq))
+            return result
+
+        def pressure(color: chess.Color) -> int:
+            king_square = board.king(not color)
+            if king_square is None:
+                return 0
+            attackers = 0
+            heavy = 0
+            opponent_squares = chess.SquareSet(board.occupied_co[not color])
+            if color == chess.WHITE:
+                forward_targets = chess.SquareSet(
+                    chess.BB_RANK_4 | chess.BB_RANK_5 | chess.BB_RANK_6 | chess.BB_RANK_7
+                )
+            else:
+                forward_targets = chess.SquareSet(
+                    chess.BB_RANK_1 | chess.BB_RANK_2 | chess.BB_RANK_3 | chess.BB_RANK_4
+                )
+            for square, piece in board.piece_map().items():
+                if piece.color != color:
+                    continue
+                attacks = chess.SquareSet(board.attacks(square))
+                attack_count = len(attacks & opponent_squares)
+                if piece.piece_type in (chess.QUEEN, chess.ROOK, chess.BISHOP):
+                    heavy += attack_count
+                attackers += len(attacks & forward_targets)
+            ring_control = sum(1 for sq in ring_squares(king_square) if board.is_attacked_by(color, sq))
+            direct = len(board.attackers(color, king_square))
+            return heavy * 4 + attackers * 2 + ring_control * 6 + direct * 8
+
+        return pressure(chess.WHITE), pressure(chess.BLACK)
+
+    def _sacrifice_bias_eval(
+        self,
+        board: chess.Board,
+        *,
+        material_white: int,
+        material_black: int,
+        attack_white: int,
+        attack_black: int,
+        king_white: int,
+        king_black: int,
+        threats: int,
+        center: int,
+        tropism_white: int,
+        tropism_black: int,
+    ) -> int:
+        side = chess.WHITE if board.turn == chess.WHITE else chess.BLACK
+        own_material = material_white if side == chess.WHITE else material_black
+        opp_material = material_black if side == chess.WHITE else material_white
+        material_deficit = own_material - opp_material
+
+        if material_deficit >= 0:
+            return 0
+
+        attack_advantage = (attack_white - attack_black) if side == chess.WHITE else (attack_black - attack_white)
+        king_pressure = (king_white - king_black) if side == chess.WHITE else (king_black - king_white)
+        threat_balance = threats if side == chess.WHITE else -threats
+        center_swing = center if side == chess.WHITE else -center
+        tropism_delta = (tropism_white - tropism_black) if side == chess.WHITE else (tropism_black - tropism_white)
+
+        combined = (
+            0.6 * attack_advantage
+            + 0.5 * king_pressure
+            + 0.4 * threat_balance
+            + 0.3 * tropism_delta
+            + 0.2 * center_swing
+        )
+
+        guardrail = max(0, -material_deficit / 6)
+        if combined <= guardrail:
+            return material_deficit // 5
+
+        bonus = self.sacrifice_bias * combined / 12 + tropism_delta * 0.4
+        return int(bonus + material_deficit / 10)
+
+
+__all__ = ["TalBotEngine"]
