@@ -148,7 +148,7 @@ templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 tal_engine = TalBotEngine(
-    max_depth=12,
+    max_depth=17,
     time_limit=12.0,
     sacrifice_bias=9.0,
     attack_weight=8.5,

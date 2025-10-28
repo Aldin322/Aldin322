@@ -388,7 +388,7 @@ class TalBotEngine:
 
     def __init__(
         self,
-        max_depth: int = 9,
+        max_depth: int = 17,
         time_limit: float = 6.0,
         sacrifice_bias: float = 12.0,
         attack_weight: float = 7.0,
