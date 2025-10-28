@@ -24,6 +24,9 @@ let currentGame = null;
 let selectedSquare = null;
 let legalMoves = {};
 let boardPositions = {};
+let isPlayerTurn = false;
+let awaitingEngine = false;
+let draggedSquare = null;
 
 function createBoard() {
   const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
@@ -39,6 +42,11 @@ function createBoard() {
       squareDiv.classList.add('square', isLight ? 'light' : 'dark');
       squareDiv.dataset.square = squareName;
       squareDiv.addEventListener('click', () => onSquareClick(squareName));
+      squareDiv.addEventListener('dragstart', (event) => onDragStart(event, squareName));
+      squareDiv.addEventListener('dragover', (event) => onDragOver(event, squareName));
+      squareDiv.addEventListener('dragleave', () => onDragLeave(squareName));
+      squareDiv.addEventListener('drop', (event) => onDrop(event, squareName));
+      squareDiv.addEventListener('dragend', () => onDragEnd());
       boardElement.appendChild(squareDiv);
       squareElements.set(squareName, squareDiv);
     }
@@ -74,10 +82,12 @@ function renderBoard(fen) {
     element.textContent = piece ? PIECE_TO_UNICODE[piece] : '';
     element.dataset.piece = piece || '';
     element.classList.remove('selected', 'destination', 'white-piece', 'black-piece');
+    element.classList.remove('drag-over');
     if (piece) {
       const isWhite = piece === piece.toUpperCase();
       element.classList.add(isWhite ? 'white-piece' : 'black-piece');
     }
+    element.draggable = false;
   }
   selectedSquare = null;
 }
@@ -101,12 +111,12 @@ function highlightMoves(square) {
 
 function clearHighlights() {
   for (const element of squareElements.values()) {
-    element.classList.remove('selected', 'destination');
+    element.classList.remove('selected', 'destination', 'drag-over');
   }
 }
 
 function onSquareClick(square) {
-  if (!currentGame) {
+  if (!isInteractionEnabled()) {
     return;
   }
   const piece = boardPositions[square];
@@ -122,6 +132,7 @@ function onSquareClick(square) {
     const moves = legalMoves[selectedSquare] || [];
     const chosenMove = moves.find((move) => move.to === square);
     if (chosenMove) {
+      resetDragState();
       sendMove(chosenMove);
       return;
     }
@@ -163,7 +174,8 @@ async function sendMove(move) {
   if (!currentGame) {
     return;
   }
-  showOverlay('Engine thinking...');
+  awaitingEngine = true;
+  updateInteractionState();
   try {
     const response = await fetch('/api/move', {
       method: 'POST',
@@ -180,9 +192,8 @@ async function sendMove(move) {
     console.error(error);
     statusElement.textContent = `Error: ${error.message}`;
   } finally {
-    if (currentGame && (currentGame.status === 'ongoing' || currentGame.status === 'check')) {
-      hideOverlay();
-    }
+    awaitingEngine = false;
+    updateInteractionState();
   }
 }
 
@@ -192,6 +203,10 @@ function updateState(state) {
   renderBoard(state.fen);
   updateStatus(state.status, state.turn);
   updateMoveList(state.history);
+  const playableStatuses = new Set(['ongoing', 'check']);
+  isPlayerTurn = state.turn === 'white' && playableStatuses.has(state.status);
+  resetDragState();
+  updateInteractionState();
   if (state.status !== 'ongoing' && state.status !== 'check') {
     showOverlay(state.status.toUpperCase());
   } else {
@@ -201,7 +216,15 @@ function updateState(state) {
 
 function updateStatus(status, turn) {
   const turnText = turn === 'white' ? "Your move" : "TalBot to move";
-  statusElement.textContent = status === 'check' ? `${turnText} – check!` : `${turnText} – ${status}`;
+  if (status === 'ongoing') {
+    statusElement.textContent = turnText;
+    return;
+  }
+  if (status === 'check') {
+    statusElement.textContent = `${turnText} – check!`;
+    return;
+  }
+  statusElement.textContent = status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 function updateMoveList(history) {
@@ -225,6 +248,8 @@ function hideOverlay() {
 }
 
 async function startNewGame() {
+  awaitingEngine = true;
+  updateInteractionState();
   showOverlay('Loading...');
   try {
     const response = await fetch('/api/new', { method: 'POST' });
@@ -238,6 +263,8 @@ async function startNewGame() {
     statusElement.textContent = `Error: ${error.message}`;
   } finally {
     hideOverlay();
+    awaitingEngine = false;
+    updateInteractionState();
   }
 }
 
@@ -245,6 +272,101 @@ function initialize() {
   createBoard();
   newGameButton.addEventListener('click', () => startNewGame());
   startNewGame();
+}
+
+function isInteractionEnabled() {
+  return (
+    currentGame !== null &&
+    isPlayerTurn &&
+    !awaitingEngine &&
+    (currentGame.status === 'ongoing' || currentGame.status === 'check')
+  );
+}
+
+function updateInteractionState() {
+  const locked = !isInteractionEnabled();
+  boardElement.classList.toggle('locked', locked);
+  boardElement.setAttribute('aria-disabled', locked ? 'true' : 'false');
+  for (const [square, element] of squareElements.entries()) {
+    const moves = legalMoves[square] || [];
+    const canDrag = !locked && moves.length > 0;
+    element.draggable = canDrag;
+    element.classList.toggle('can-drag', canDrag);
+  }
+}
+
+function onDragStart(event, square) {
+  if (!isInteractionEnabled()) {
+    event.preventDefault();
+    return;
+  }
+  const moves = legalMoves[square] || [];
+  if (moves.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  draggedSquare = square;
+  selectedSquare = square;
+  boardElement.classList.add('dragging');
+  highlightMoves(square);
+  const piece = boardPositions[square];
+  if (piece && event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    const dragIcon = document.createElement('div');
+    dragIcon.className = 'drag-piece';
+    dragIcon.textContent = PIECE_TO_UNICODE[piece];
+    document.body.appendChild(dragIcon);
+    const { width, height } = dragIcon.getBoundingClientRect();
+    event.dataTransfer.setDragImage(dragIcon, width / 2, height / 2);
+    setTimeout(() => {
+      document.body.removeChild(dragIcon);
+    }, 0);
+  }
+}
+
+function onDragOver(event, square) {
+  if (!draggedSquare) {
+    return;
+  }
+  const moves = legalMoves[draggedSquare] || [];
+  if (moves.some((move) => move.to === square)) {
+    event.preventDefault();
+    const target = squareElements.get(square);
+    if (target) {
+      target.classList.add('drag-over');
+    }
+  }
+}
+
+function onDragLeave(square) {
+  const target = squareElements.get(square);
+  if (target) {
+    target.classList.remove('drag-over');
+  }
+}
+
+function onDrop(event, square) {
+  if (!draggedSquare) {
+    return;
+  }
+  event.preventDefault();
+  const moves = legalMoves[draggedSquare] || [];
+  const chosenMove = moves.find((move) => move.to === square);
+  if (chosenMove) {
+    sendMove(chosenMove);
+  }
+  resetDragState();
+}
+
+function onDragEnd() {
+  resetDragState();
+}
+
+function resetDragState() {
+  boardElement.classList.remove('dragging');
+  draggedSquare = null;
+  selectedSquare = null;
+  clearHighlights();
 }
 
 window.addEventListener('DOMContentLoaded', initialize);
