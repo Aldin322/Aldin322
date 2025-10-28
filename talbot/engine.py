@@ -175,6 +175,8 @@ class SearchState:
     transposition: Dict[int, TTEntry] = field(default_factory=dict)
     killers: Dict[int, List[chess.Move]] = field(default_factory=dict)
     history: Dict[Tuple[int, int], int] = field(default_factory=dict)
+    countermoves: Dict[Tuple[int, int], chess.Move] = field(default_factory=dict)
+    capture_history: Dict[Tuple[int, int], int] = field(default_factory=dict)
     nodes: int = 0
     stop: bool = False
     generation: int = 0
@@ -529,7 +531,7 @@ class TalBotEngine:
         key = self._hash(board)
         tt_entry = self._fetch_transposition(key, state)
         hash_move = pv_hint or (tt_entry.move if tt_entry else None)
-        moves = self._order_moves(board, 0, hash_move, state)
+        moves = self._order_moves(board, 0, hash_move, state, None)
 
         if not moves:
             if board.is_checkmate():
@@ -554,6 +556,7 @@ class TalBotEngine:
                 root_eval,
                 0,
                 0,
+                move,
             )
             board.pop()
 
@@ -587,6 +590,7 @@ class TalBotEngine:
         parent_eval: Optional[int],
         check_extensions: int,
         sacrifice_extensions: int,
+        previous_move: Optional[chess.Move],
     ) -> int:
         if state.time_exceeded():
             return 0
@@ -664,6 +668,7 @@ class TalBotEngine:
                 parent_eval,
                 check_extensions,
                 sacrifice_extensions,
+                previous_move,
             )
             refreshed = self._fetch_transposition(key, state)
             if refreshed:
@@ -683,12 +688,13 @@ class TalBotEngine:
                 parent_static_for_children,
                 0,
                 0,
+                None,
             )
             board.pop()
             if null_score >= beta:
                 return beta
 
-        moves = self._order_moves(board, ply, tt_move, state)
+        moves = self._order_moves(board, ply, tt_move, state, previous_move)
         if not moves:
             if in_check:
                 return -MATE_SCORE + ply
@@ -706,6 +712,13 @@ class TalBotEngine:
             is_capture = board.is_capture(move)
             is_sacrifice_move = self._is_sacrifice(board, move)
             history_score = state.history.get((move.from_square, move.to_square), 0)
+            attacker_piece = board.piece_at(move.from_square)
+            attacker_type = attacker_piece.piece_type if attacker_piece else 0
+            victim_piece = board.piece_at(move.to_square)
+            if victim_piece is None and board.is_en_passant(move):
+                victim_type = chess.PAWN
+            else:
+                victim_type = victim_piece.piece_type if victim_piece else 0
 
             board.push(move)
 
@@ -795,6 +808,7 @@ class TalBotEngine:
                     current_static,
                     next_check_extensions,
                     next_sacrifice_extensions,
+                    move,
                 )
             else:
                 score = -self._pv_search(
@@ -807,6 +821,7 @@ class TalBotEngine:
                     current_static,
                     next_check_extensions,
                     next_sacrifice_extensions,
+                    move,
                 )
                 if score > alpha:
                     score = -self._pv_search(
@@ -819,6 +834,7 @@ class TalBotEngine:
                         current_static,
                         next_check_extensions,
                         next_sacrifice_extensions,
+                        move,
                     )
 
             board.pop()
@@ -833,14 +849,30 @@ class TalBotEngine:
                 alpha = score
                 if not is_capture:
                     self._update_history(move, depth, state)
-            elif not is_capture:
-                key_hist = (move.from_square, move.to_square)
-                penalty = depth * depth
-                new_score = state.history.get(key_hist, 0) - penalty
-                if new_score <= 0:
-                    state.history.pop(key_hist, None)
                 else:
-                    state.history[key_hist] = new_score
+                    self._update_capture_history(attacker_type, victim_type, depth, state, True)
+                if previous_move is not None and score > alpha_orig:
+                    state.countermoves[(previous_move.from_square, previous_move.to_square)] = move
+            else:
+                if is_capture:
+                    self._update_capture_history(attacker_type, victim_type, depth, state, False)
+                else:
+                    key_hist = (move.from_square, move.to_square)
+                    penalty = depth * depth
+                    new_score = state.history.get(key_hist, 0) - penalty
+                    if new_score <= 0:
+                        state.history.pop(key_hist, None)
+                    else:
+                        state.history[key_hist] = new_score
+
+            if score >= beta:
+                if not is_capture:
+                    self._store_killer(move, ply, state)
+                    self._update_history(move, depth, state)
+                if previous_move is not None:
+                    state.countermoves[(previous_move.from_square, previous_move.to_square)] = move
+                break
+
             if alpha >= beta:
                 if not is_capture:
                     self._store_killer(move, ply, state)
@@ -917,20 +949,41 @@ class TalBotEngine:
         ply: int,
         hash_move: Optional[chess.Move],
         state: SearchState,
+        previous_move: Optional[chess.Move],
     ) -> List[chess.Move]:
         killers = state.killers.get(ply, [])
+        counter_move: Optional[chess.Move] = None
+        if previous_move is not None:
+            counter_move = state.countermoves.get(
+                (previous_move.from_square, previous_move.to_square)
+            )
 
         moves = list(board.legal_moves)
 
         def move_score(move: chess.Move, order_index: int) -> int:
             if move == hash_move:
                 return 1_000_000
+            if counter_move is not None and move == counter_move:
+                return 900_000 - order_index
             if board.is_capture(move):
                 victim = board.piece_at(move.to_square)
                 attacker = board.piece_at(move.from_square)
                 victim_val = 0 if victim is None else PIECE_VALUES.get(victim.piece_type, 0)
                 attacker_val = 0 if attacker is None else PIECE_VALUES.get(attacker.piece_type, 0)
-                return 600_000 + 100 * victim_val - attacker_val - 15 * order_index
+                if victim is None and board.is_en_passant(move):
+                    victim_val = PIECE_VALUES[chess.PAWN]
+                attacker_type = attacker.piece_type if attacker else 0
+                victim_type = victim.piece_type if victim else (
+                    chess.PAWN if board.is_en_passant(move) else 0
+                )
+                capture_bonus = state.capture_history.get((attacker_type, victim_type), 0)
+                return (
+                    600_000
+                    + 100 * victim_val
+                    - attacker_val
+                    - 15 * order_index
+                    + capture_bonus
+                )
             if move in killers:
                 return 450_000 - killers.index(move) * 1_000
             history_score = state.history.get((move.from_square, move.to_square), 0)
@@ -1041,6 +1094,24 @@ class TalBotEngine:
         key = (move.from_square, move.to_square)
         bonus = depth * depth
         state.history[key] = state.history.get(key, 0) + bonus
+
+    def _update_capture_history(
+        self,
+        attacker_type: int,
+        victim_type: int,
+        depth: int,
+        state: SearchState,
+        success: bool,
+    ) -> None:
+        if attacker_type <= 0:
+            return
+        key = (attacker_type, victim_type)
+        delta = depth * depth
+        if not success:
+            delta = -max(1, delta // 2)
+        value = state.capture_history.get(key, 0) + delta
+        value = max(-5_000, min(5_000, value))
+        state.capture_history[key] = value
 
     def _can_null_move(self, board: chess.Board) -> bool:
         if board.turn == chess.WHITE:
