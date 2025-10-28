@@ -49,8 +49,9 @@ main {
 
 .board-container {
   position: relative;
-  width: min(70vw, 600px);
-  aspect-ratio: 1 / 1;
+  width: 640px;
+  height: 640px;
+  flex: 0 0 640px;
   border-radius: 16px;
   overflow: hidden;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
@@ -68,7 +69,7 @@ main {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: clamp(1.5rem, 4vw, 3.75rem);
+  font-size: 3.5rem;
   cursor: pointer;
   position: relative;
   transition: transform 0.15s ease;
@@ -124,6 +125,23 @@ main {
 
 .board-overlay.visible {
   display: flex;
+}
+
+@media (max-width: 900px) {
+  main {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .board-container {
+    width: min(90vw, 520px);
+    height: min(90vw, 520px);
+    flex: 0 0 auto;
+  }
+
+  .square {
+    font-size: min(3.25rem, calc(min(90vw, 520px) / 8 * 0.9));
+  }
 }
 
 .sidebar {

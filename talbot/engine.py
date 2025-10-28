@@ -177,11 +177,11 @@ class TalBotEngine:
 
     def __init__(
         self,
-        max_depth: int = 6,
-        time_limit: float = 4.5,
-        sacrifice_bias: float = 10.0,
-        attack_weight: float = 7.5,
-        mobility_weight: float = 2.5,
+        max_depth: int = 7,
+        time_limit: float = 6.5,
+        sacrifice_bias: float = 9.5,
+        attack_weight: float = 8.0,
+        mobility_weight: float = 3.0,
     ) -> None:
         self.max_depth = max_depth
         self.time_limit = time_limit
@@ -218,7 +218,7 @@ class TalBotEngine:
                 alpha = max(alpha, int(best_value) - aspiration_window)
                 beta = min(beta, int(best_value) + aspiration_window)
 
-            value, move = self._search_root(board, depth, alpha, beta, state)
+            value, move = self._search_root(board, depth, alpha, beta, state, best_move)
 
             if state.time_up():
                 break
@@ -248,11 +248,16 @@ class TalBotEngine:
         alpha: int,
         beta: int,
         state: SearchState,
+        pv_hint: Optional[chess.Move] = None,
     ) -> Tuple[int, Optional[chess.Move]]:
         best_value = -MATE_VALUE
         best_move: Optional[chess.Move] = None
 
-        moves = self._order_moves(board, depth=0, hash_move=None, state=state)
+        root_key = _board_hash(board)
+        entry = state.transposition_table.get(root_key)
+        tt_move = entry.move if entry else None
+        hash_move = pv_hint or tt_move
+        moves = self._order_moves(board, depth=0, hash_move=hash_move, state=state)
         if not moves:
             # No legal moves
             if board.is_checkmate():
@@ -350,6 +355,19 @@ class TalBotEngine:
             if new_depth < 0:
                 new_depth = 0
 
+            if (
+                new_depth <= 2
+                and not in_check
+                and not is_capture
+                and not gives_check
+                and move.promotion is None
+            ):
+                static = self._evaluate(board)
+                futility_margin = 120 + 120 * new_depth
+                if static + futility_margin <= alpha:
+                    board.pop()
+                    continue
+
             reduction = 0
             if (
                 new_depth > 0
@@ -361,7 +379,10 @@ class TalBotEngine:
             ):
                 reduction = 1 + (1 if index > 6 else 0)
 
-            if index > 0:
+            score: int
+            if index == 0:
+                score = -self._negamax(board, new_depth, -beta, -alpha, state, ply + 1)
+            else:
                 score = -self._negamax(
                     board,
                     max(0, new_depth - reduction),
@@ -372,8 +393,6 @@ class TalBotEngine:
                 )
                 if score > alpha:
                     score = -self._negamax(board, new_depth, -beta, -alpha, state, ply + 1)
-            else:
-                score = -self._negamax(board, new_depth, -beta, -alpha, state, ply + 1)
             board.pop()
 
             if state.time_up():
@@ -428,6 +447,19 @@ class TalBotEngine:
                 return beta
             if score > alpha:
                 alpha = score
+
+        if alpha < beta - 1:
+            for move in self._generate_checks(board):
+                if state.time_up():
+                    break
+                board.push(move)
+                score = -self._quiescence(board, -beta, -alpha, state, ply + 1)
+                board.pop()
+
+                if score >= beta:
+                    return beta
+                if score > alpha:
+                    alpha = score
         return alpha
 
     def _order_moves(
@@ -469,6 +501,16 @@ class TalBotEngine:
         captures = [move for move in board.legal_moves if board.is_capture(move) or move.promotion]
         captures.sort(key=lambda m: self._capture_score(board, m), reverse=True)
         return captures
+
+    def _generate_checks(self, board: chess.Board) -> Iterable[chess.Move]:
+        checks: List[chess.Move] = []
+        for move in board.legal_moves:
+            if board.is_capture(move) or move.promotion:
+                continue
+            if board.gives_check(move):
+                checks.append(move)
+        checks.sort(key=lambda m: self.history_heuristic.get((m.from_square, m.to_square), 0), reverse=True)
+        return checks[:6]
 
     def _capture_score(self, board: chess.Board, move: chess.Move) -> int:
         victim = board.piece_at(move.to_square)
@@ -516,6 +558,7 @@ class TalBotEngine:
         bishop_pair = self._bishop_pair_bonus(board)
         rook_activity = self._rook_activity(board)
         space = self._space_score(board)
+        threats = self._threat_score(board)
         tempo = 10 if board.turn == chess.WHITE else -10
 
         score = (
@@ -529,6 +572,7 @@ class TalBotEngine:
             + bishop_pair
             + rook_activity
             + space
+            + threats
             + tempo
         )
         return score if board.turn == chess.WHITE else -score
@@ -574,6 +618,26 @@ class TalBotEngine:
         board.turn = turn
         return self.mobility_weight * (white_moves - black_moves)
 
+    def _threat_score(self, board: chess.Board) -> int:
+        score = 0
+        for square, piece in board.piece_map().items():
+            piece_value = PIECE_VALUES.get(piece.piece_type, 0)
+            attackers_white = len(board.attackers(chess.WHITE, square))
+            attackers_black = len(board.attackers(chess.BLACK, square))
+            if piece.color == chess.WHITE:
+                pressure = attackers_black - attackers_white
+                if pressure > 0:
+                    score -= min(piece_value, 35 * pressure)
+                elif pressure < 0:
+                    score += min(piece_value // 2, 30 * (-pressure))
+            else:
+                pressure = attackers_white - attackers_black
+                if pressure > 0:
+                    score += min(piece_value, 35 * pressure)
+                elif pressure < 0:
+                    score -= min(piece_value // 2, 30 * (-pressure))
+        return score
+
     def _king_safety(self, board: chess.Board) -> int:
         score = 0
         for color in (chess.WHITE, chess.BLACK):
@@ -601,14 +665,34 @@ class TalBotEngine:
         king_square = board.king(enemy)
         if king_square is None:
             return 0
+
         pressure = 0
         king_ring = chess.SquareSet(chess.BB_KING_ATTACKS[king_square] | chess.BB_SQUARES[king_square])
+        direct_checks = len(board.attackers(color, king_square))
+        pressure += 6 * direct_checks
+
         for square in king_ring:
             attackers = board.attackers(color, square)
-            pressure += len(attackers)
-        # Encourage coordinated attacks with queen and minor pieces
-        queen_attacks = len(board.pieces(chess.QUEEN, color))
-        pressure += queen_attacks
+            if not attackers:
+                continue
+            defenders = board.attackers(enemy, square)
+            pressure += 3 * len(attackers)
+            if len(attackers) > len(defenders):
+                pressure += 4
+            occupant = board.piece_at(square)
+            if occupant and occupant.color == enemy:
+                pressure += 2
+            for attacker_square in attackers:
+                piece = board.piece_at(attacker_square)
+                if not piece or piece.color != color:
+                    continue
+                if piece.piece_type in (chess.QUEEN, chess.ROOK):
+                    pressure += 2
+                elif piece.piece_type in (chess.BISHOP, chess.KNIGHT):
+                    pressure += 1
+
+        open_lines = self._open_files_near_king(board, king_square, enemy)
+        pressure += 3 * open_lines
         return pressure
 
     def _sacrifice_score(
@@ -627,18 +711,28 @@ class TalBotEngine:
             compensation = self._sacrifice_compensation(
                 board, chess.WHITE, attack_white, attack_black
             )
-            net = compensation - white_deficit / 100.0
-            score += self.sacrifice_bias * 100.0 * max(-2.5, min(2.5, net))
+            score += self._sacrifice_adjustment(white_deficit, compensation)
         if black_deficit:
             compensation = self._sacrifice_compensation(
                 board, chess.BLACK, attack_black, attack_white
             )
-            net = compensation - black_deficit / 100.0
-            score -= self.sacrifice_bias * 100.0 * max(-2.5, min(2.5, net))
+            score -= self._sacrifice_adjustment(black_deficit, compensation)
 
         initiative = 18 if board.turn == chess.WHITE else -18
         score += initiative
         return int(score)
+
+    def _sacrifice_adjustment(self, deficit: int, compensation: float) -> float:
+        required = deficit / 100.0
+        net = compensation - required
+        capped = max(-2.5, min(2.5, net))
+        if net > 0.35:
+            scale = 120.0
+        elif net > 0.0:
+            scale = 60.0
+        else:
+            scale = 80.0
+        return self.sacrifice_bias * scale * capped
 
     def _sacrifice_compensation(
         self,
@@ -653,8 +747,28 @@ class TalBotEngine:
             0,
             self._king_exposure(board, enemy) - self._king_exposure(board, color),
         )
+        support_edge = max(0.0, self._attack_support(board, color) - self._attack_support(board, enemy))
         check_bonus = 1.8 if board.is_check() and board.turn == color else 0.0
-        return (0.45 * pressure_edge + 0.55 * exposure_edge) / 3.0 + check_bonus
+        return (0.35 * pressure_edge + 0.4 * exposure_edge + 0.25 * support_edge) / 3.0 + check_bonus
+
+    def _attack_support(self, board: chess.Board, color: chess.Color) -> float:
+        enemy = not color
+        king_square = board.king(enemy)
+        if king_square is None:
+            return 0.0
+        king_ring = chess.SquareSet(
+            chess.BB_KING_ATTACKS[king_square] | chess.BB_SQUARES[king_square]
+        )
+        support = 0.0
+        for square in king_ring:
+            attackers = board.attackers(color, square)
+            defenders = board.attackers(enemy, square)
+            if not attackers:
+                continue
+            advantage = len(attackers) - len(defenders)
+            if advantage > 0:
+                support += advantage
+        return support
 
     def _king_exposure(self, board: chess.Board, color: chess.Color) -> int:
         king_square = board.king(color)
