@@ -479,6 +479,10 @@ class TalBotEngine:
 
         state.nodes += 1
 
+        static_eval_parent: Optional[int] = None
+        if depth <= 3 and not in_check:
+            static_eval_parent = self._evaluate(board)
+
         # Null move pruning
         if depth >= 3 and not in_check and self._can_null_move(board):
             board.push(chess.Move.null())
@@ -512,12 +516,26 @@ class TalBotEngine:
 
             is_capture = board.is_capture(move)
             is_sacrifice_move = self._is_sacrifice(board, move)
+            history_score = state.history.get((move.from_square, move.to_square), 0)
 
             board.push(move)
 
             gives_check = board.is_check()
             next_check_extensions = check_extensions + 1 if gives_check else 0
             next_sacrifice_extensions = sacrifice_extensions + 1 if is_sacrifice_move else 0
+
+            if (
+                static_eval_parent is not None
+                and depth <= 2
+                and index > 6
+                and not is_capture
+                and not gives_check
+                and move.promotion is None
+            ):
+                futility_margin = 120 + 60 * depth
+                if static_eval_parent + futility_margin <= alpha:
+                    board.pop()
+                    continue
 
             reduction = 0
             if (
@@ -527,7 +545,13 @@ class TalBotEngine:
                 and not gives_check
                 and move.promotion is None
             ):
-                reduction = 1 + (1 if index > 6 else 0)
+                base = math.log(depth) * math.log(index + 1)
+                reduction = int(base / 1.7)
+                if history_score > 1500:
+                    reduction = max(0, reduction - 1)
+                elif history_score < 0:
+                    reduction += 1
+                reduction = min(reduction, depth - 1)
 
             extension = 1 if gives_check and depth > 1 and next_check_extensions <= self.max_check_extensions else 0
             sacrifice_extension = (

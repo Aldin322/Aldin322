@@ -75,8 +75,8 @@ function parseFenBoard(fen) {
   return squares;
 }
 
-function renderBoard(fen) {
-  boardPositions = parseFenBoard(fen);
+function setBoardPositions(positions) {
+  boardPositions = positions;
   for (const [square, element] of squareElements.entries()) {
     const piece = boardPositions[square];
     element.textContent = piece ? PIECE_TO_UNICODE[piece] : '';
@@ -90,6 +90,80 @@ function renderBoard(fen) {
     element.draggable = false;
   }
   selectedSquare = null;
+}
+
+function renderBoard(fen) {
+  setBoardPositions(parseFenBoard(fen));
+}
+
+function promotionPieceForMove(piece, move) {
+  const promotionKey = move.promotion || (move.uci && move.uci.length === 5 ? move.uci[4] : null);
+  if (!promotionKey) {
+    return piece;
+  }
+  const symbol = promotionKey.toLowerCase();
+  if (!['q', 'r', 'b', 'n'].includes(symbol)) {
+    return piece;
+  }
+  const isWhite = piece === piece.toUpperCase();
+  return isWhite ? symbol.toUpperCase() : symbol;
+}
+
+function applyLocalMove(move) {
+  if (!move || !move.source || !move.to) {
+    return null;
+  }
+  const piece = boardPositions[move.source];
+  if (!piece) {
+    return null;
+  }
+
+  const nextPositions = { ...boardPositions };
+  delete nextPositions[move.source];
+
+  const isWhite = piece === piece.toUpperCase();
+  const pieceLower = piece.toLowerCase();
+  const sourceFile = move.source.charCodeAt(0);
+  const targetFile = move.to.charCodeAt(0);
+
+  if (
+    pieceLower === 'p' &&
+    move.source[0] !== move.to[0] &&
+    !boardPositions[move.to]
+  ) {
+    const targetRank = Number.parseInt(move.to[1], 10);
+    const captureRank = targetRank + (isWhite ? -1 : 1);
+    if (captureRank >= 1 && captureRank <= 8) {
+      const captureSquare = `${move.to[0]}${captureRank}`;
+      delete nextPositions[captureSquare];
+    }
+  }
+
+  if (pieceLower === 'k' && Math.abs(sourceFile - targetFile) === 2) {
+    const homeRank = isWhite ? '1' : '8';
+    if (move.to[0] === 'g') {
+      const rookFrom = `h${homeRank}`;
+      const rookTo = `f${homeRank}`;
+      const rook = nextPositions[rookFrom];
+      if (rook) {
+        delete nextPositions[rookFrom];
+        nextPositions[rookTo] = rook;
+      }
+    } else if (move.to[0] === 'c') {
+      const rookFrom = `a${homeRank}`;
+      const rookTo = `d${homeRank}`;
+      const rook = nextPositions[rookFrom];
+      if (rook) {
+        delete nextPositions[rookFrom];
+        nextPositions[rookTo] = rook;
+      }
+    }
+  }
+
+  const promotedPiece = promotionPieceForMove(piece, move);
+  delete nextPositions[move.to];
+  nextPositions[move.to] = promotedPiece;
+  return nextPositions;
 }
 
 function highlightMoves(square) {
@@ -175,6 +249,12 @@ async function sendMove(move) {
     return;
   }
   awaitingEngine = true;
+  const previousPositions = { ...boardPositions };
+  const previewPositions = applyLocalMove(move);
+  if (previewPositions) {
+    clearHighlights();
+    setBoardPositions(previewPositions);
+  }
   updateInteractionState();
   try {
     const response = await fetch('/api/move', {
@@ -191,6 +271,7 @@ async function sendMove(move) {
   } catch (error) {
     console.error(error);
     statusElement.textContent = `Error: ${error.message}`;
+    setBoardPositions(previousPositions);
   } finally {
     awaitingEngine = false;
     updateInteractionState();
