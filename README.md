@@ -19,6 +19,7 @@ for playing against it online.
 - Python chess engine biased toward initiative, king attacks, and selectively sound sacrifices.
 - Alpha-beta search with deep pruning, killer/history heuristics, tapered evaluation, and new pawn/rook/king heuristics to keep
   play around the 2400 level.
+- PyTorch-backed neural evaluator that fuses tactical pressure, king safety, and initiative features into a Tal-style score.
 - Center control, threat-tracking, and king-tropism evaluation layers that reward only well-supported sacrificial attacks and
   punish speculative material gifts.
 - FastAPI-powered web server exposing REST endpoints and a responsive front-end with Unicode
@@ -31,6 +32,8 @@ for playing against it online.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# Optional: install PyTorch to enable the accelerated neural evaluator
+# pip install torch
 python server.py
 ```
 

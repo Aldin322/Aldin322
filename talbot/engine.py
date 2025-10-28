@@ -3,10 +3,26 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import chess
+
+try:
+    import torch
+    from torch import nn
+    from torch.nn import functional as F
+except ImportError:  # pragma: no cover - PyTorch is optional at runtime
+    torch = None
+    nn = None
+    F = None
+else:  # pragma: no cover - configuring optional dependency
+    warnings.filterwarnings(
+        "ignore",
+        message="Failed to initialize NumPy",
+        module="torch.nn.modules.linear",
+    )
 
 
 MATE_SCORE = 1_000_000
@@ -175,7 +191,7 @@ class SearchState:
 
 
 class NeuralEvaluator:
-    """A lightweight neural network to score chess features."""
+    """PyTorch-backed neural network (with a pure-Python fallback) to score chess features."""
 
     FEATURE_ORDER = [
         "material",
@@ -202,8 +218,16 @@ class NeuralEvaluator:
     def __init__(self) -> None:
         self.feature_index = {name: idx for idx, name in enumerate(self.FEATURE_ORDER)}
 
-        # Hidden layers emphasise different combinations of features.
-        self.layer1: List[Tuple[List[float], float]] = [
+        self.deep_scale: float = 160.0
+
+        # Define the neural layers using PyTorch so the engine evaluation can
+        # benefit from optimised tensor math while keeping deterministic
+        # initial weights tuned for Tal-flavoured play. If PyTorch is absent
+        # (e.g. on constrained systems), we fall back to a numerically
+        # equivalent Python execution path.
+        input_size = len(self.FEATURE_ORDER)
+
+        layer1_rows: List[Tuple[List[float], float]] = [
             (self._row(material=3.2, pst=1.4, mobility=0.9, tempo=0.3, phase=0.4, initiative=0.6), 0.0),
             (self._row(material=2.4, pawn_structure=1.3, center=0.7, threats=0.4, initiative=0.3), 0.0),
             (self._row(king_delta=1.6, king_black=1.2, attack_delta=1.0, attack_white=0.6, initiative=0.8, tropism=0.7), 0.0),
@@ -222,7 +246,7 @@ class NeuralEvaluator:
             (self._row(threats=1.0, attack_delta=0.9, king_black=0.6, sacrifice=0.5, initiative=0.6), 0.0),
         ]
 
-        self.layer2: List[Tuple[List[float], float]] = [
+        layer2_rows: List[Tuple[List[float], float]] = [
             ([1.1, 0.8, 1.0, 0.6, 0.4, 0.7, 0.5, 1.0, 0.3, 0.8, 0.6, 0.5, 0.7, 0.4, 0.9, 0.8], 0.0),
             ([0.6, 0.7, 0.9, 0.8, 0.6, 0.7, 0.5, 0.9, 0.4, 0.9, 0.5, 0.6, 0.8, 0.3, 0.7, 0.6], 0.0),
             ([0.7, 0.5, 0.8, 0.7, 0.5, 0.6, 0.4, 0.9, 0.3, 0.8, 0.5, 0.7, 0.6, 0.4, 0.8, 0.7], 0.0),
@@ -233,7 +257,7 @@ class NeuralEvaluator:
             ([0.7, 0.6, 0.6, 0.7, 0.4, 0.6, 0.3, 0.8, 0.2, 0.7, 0.5, 0.5, 0.7, 0.4, 0.8, 0.6], 0.0),
         ]
 
-        self.layer3: List[Tuple[List[float], float]] = [
+        layer3_rows: List[Tuple[List[float], float]] = [
             ([0.9, 0.7, 0.8, 0.9, 0.7, 0.6, 0.8, 0.7], 0.0),
             ([0.8, 0.9, 0.7, 0.8, 0.6, 0.7, 0.8, 0.6], 0.0),
             ([0.7, 0.8, 0.9, 0.7, 0.6, 0.7, 0.8, 0.7], 0.0),
@@ -242,9 +266,10 @@ class NeuralEvaluator:
             ([0.7, 0.8, 0.7, 0.8, 0.6, 0.7, 0.8, 0.6], 0.0),
         ]
 
-        self.output_weights: List[float] = [0.95, 0.85, 0.8, 0.9, 0.7, 0.75]
-        self.output_bias: float = 0.0
-        self.direct_weights: List[float] = self._row(
+        output_weights: List[float] = [0.95, 0.85, 0.8, 0.9, 0.7, 0.75]
+        output_bias: float = 0.0
+
+        direct_weights = self._row(
             material=140.0,
             pst=110.0,
             mobility=65.0,
@@ -265,24 +290,79 @@ class NeuralEvaluator:
             sacrifice=40.0,
             initiative=50.0,
         )
-        self.deep_scale: float = 160.0
+
+        self.direct_weights = direct_weights
+        self.layer1_rows = layer1_rows
+        self.layer2_rows = layer2_rows
+        self.layer3_rows = layer3_rows
+        self.output_weights = output_weights
+        self.output_bias = output_bias
+
+        self._use_torch = torch is not None
+        if self._use_torch:
+            self.linear_head = nn.Linear(input_size, 1, bias=False)
+            self.layer1 = nn.Linear(input_size, len(layer1_rows), bias=True)
+            self.layer2 = nn.Linear(len(layer1_rows), len(layer2_rows), bias=True)
+            self.layer3 = nn.Linear(len(layer2_rows), len(layer3_rows), bias=True)
+            self.output_layer = nn.Linear(len(layer3_rows), 1, bias=True)
+
+            with torch.no_grad():
+                self.linear_head.weight.copy_(torch.tensor([direct_weights], dtype=torch.float32))
+
+                self.layer1.weight.copy_(
+                    torch.tensor([weights for weights, _ in layer1_rows], dtype=torch.float32)
+                )
+                self.layer1.bias.copy_(torch.tensor([bias for _, bias in layer1_rows], dtype=torch.float32))
+
+                self.layer2.weight.copy_(
+                    torch.tensor([weights for weights, _ in layer2_rows], dtype=torch.float32)
+                )
+                self.layer2.bias.copy_(torch.tensor([bias for _, bias in layer2_rows], dtype=torch.float32))
+
+                self.layer3.weight.copy_(
+                    torch.tensor([weights for weights, _ in layer3_rows], dtype=torch.float32)
+                )
+                self.layer3.bias.copy_(torch.tensor([bias for _, bias in layer3_rows], dtype=torch.float32))
+
+                self.output_layer.weight.copy_(
+                    torch.tensor([output_weights], dtype=torch.float32)
+                )
+                self.output_layer.bias.copy_(torch.tensor([output_bias], dtype=torch.float32))
+
+            for module in (self.linear_head, self.layer1, self.layer2, self.layer3, self.output_layer):
+                module.eval()
+                module.requires_grad_(False)
 
     def evaluate(self, features: Dict[str, float]) -> float:
         vector = [features.get(name, 0.0) for name in self.FEATURE_ORDER]
+
+        if self._use_torch:
+            tensor = torch.tensor(vector, dtype=torch.float32)
+            with torch.no_grad():
+                linear = self.linear_head(tensor).squeeze(-1)
+                hidden1 = F.leaky_relu(self.layer1(tensor), negative_slope=0.1)
+                hidden2 = F.leaky_relu(self.layer2(hidden1), negative_slope=0.1)
+                hidden3 = F.leaky_relu(self.layer3(hidden2), negative_slope=0.1)
+                deep_raw = self.output_layer(hidden3).squeeze(-1)
+                modulation = hidden1.mean()
+                deep_score = torch.tanh(deep_raw + 0.5 * modulation)
+                result = linear + deep_score * self.deep_scale
+            return float(result.item())
+
         linear = sum(weight * value for weight, value in zip(self.direct_weights, vector))
 
         hidden1 = [
             self._activation(sum(weight * value for weight, value in zip(weights, vector)) + bias)
-            for weights, bias in self.layer1
+            for weights, bias in self.layer1_rows
         ]
         hidden2 = [
             self._activation(sum(weight * value for weight, value in zip(weights, hidden1)) + bias)
-            for weights, bias in self.layer2
+            for weights, bias in self.layer2_rows
         ]
 
         hidden3 = [
             self._activation(sum(weight * value for weight, value in zip(weights, hidden2)) + bias)
-            for weights, bias in self.layer3
+            for weights, bias in self.layer3_rows
         ]
 
         deep_raw = sum(weight * value for weight, value in zip(self.output_weights, hidden3)) + self.output_bias
