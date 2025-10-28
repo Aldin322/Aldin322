@@ -413,6 +413,22 @@ class TalBotEngine:
         self.max_sacrifice_extensions = max(0, max_sacrifice_extensions)
         self.neural_evaluator = NeuralEvaluator()
 
+        # Persistent learning tables that survive between moves so iterative
+        # searches can re-use knowledge gathered from previous iterations.
+        self._transposition_table: Dict[int, TTEntry] = {}
+        self._history_table: Dict[Tuple[int, int], int] = {}
+        self._countermove_table: Dict[Tuple[int, int], chess.Move] = {}
+        self._capture_history_table: Dict[Tuple[int, int], int] = {}
+        self._eval_cache_table: Dict[int, int] = {}
+
+        # Size limits keep the auxiliary tables bounded so long-running games
+        # do not accumulate unbounded state.
+        self.transposition_limit = 250_000
+        self.eval_cache_limit = 120_000
+        self.history_limit = 12_000
+        self.capture_history_limit = 12_000
+        self.countermove_limit = 4_096
+
     def _age_transposition(self, state: SearchState) -> None:
         """Drop stale transposition entries so the table stays relevant."""
 
@@ -434,14 +450,18 @@ class TalBotEngine:
         state: SearchState,
     ) -> None:
         existing = state.transposition.get(key)
+        replaced = False
         if existing is None:
             state.transposition[key] = entry
-            return
-        if entry.depth > existing.depth:
+            replaced = True
+        elif entry.depth > existing.depth:
             state.transposition[key] = entry
-            return
-        if entry.depth == existing.depth and entry.generation >= existing.generation:
+            replaced = True
+        elif entry.depth == existing.depth and entry.generation >= existing.generation:
             state.transposition[key] = entry
+            replaced = True
+        if replaced:
+            self._enforce_transposition_limit(state.transposition)
 
     def _fetch_transposition(self, key: int, state: SearchState) -> Optional[TTEntry]:
         entry = state.transposition.get(key)
@@ -450,6 +470,91 @@ class TalBotEngine:
         if state.generation - entry.generation > 5:
             return None
         return entry
+
+    def _decay_learning_tables(self) -> None:
+        """Lightly decay history-style tables to keep values bounded."""
+
+        decay = 0.875
+        for table in (self._history_table, self._capture_history_table):
+            for key, value in list(table.items()):
+                new_value = int(value * decay)
+                if new_value == 0:
+                    table.pop(key, None)
+                else:
+                    table[key] = new_value
+
+    def _enforce_transposition_limit(self, table: Dict[int, TTEntry]) -> None:
+        if self.transposition_limit <= 0:
+            return
+        excess = len(table) - self.transposition_limit
+        if excess <= 0:
+            return
+        stale = sorted(
+            table.items(),
+            key=lambda item: (item[1].generation, item[1].depth),
+        )
+        for key, _ in stale[:excess]:
+            table.pop(key, None)
+
+    def _enforce_eval_cache_limit(self, cache: Dict[int, int]) -> None:
+        if self.eval_cache_limit <= 0:
+            return
+        excess = len(cache) - self.eval_cache_limit
+        if excess <= 0:
+            return
+        for _ in range(excess):
+            try:
+                oldest_key = next(iter(cache))
+            except StopIteration:
+                break
+            cache.pop(oldest_key, None)
+
+    def _enforce_history_limit(self, table: Dict[Tuple[int, int], int]) -> None:
+        if self.history_limit <= 0:
+            return
+        excess = len(table) - self.history_limit
+        if excess <= 0:
+            return
+        weakest = sorted(table.items(), key=lambda item: abs(item[1]))[:excess]
+        for key, _ in weakest:
+            table.pop(key, None)
+
+    def _enforce_capture_history_limit(
+        self, table: Dict[Tuple[int, int], int]
+    ) -> None:
+        if self.capture_history_limit <= 0:
+            return
+        excess = len(table) - self.capture_history_limit
+        if excess <= 0:
+            return
+        weakest = sorted(table.items(), key=lambda item: abs(item[1]))[:excess]
+        for key, _ in weakest:
+            table.pop(key, None)
+
+    def _enforce_countermove_limit(
+        self, table: Dict[Tuple[int, int], chess.Move]
+    ) -> None:
+        if self.countermove_limit <= 0:
+            return
+        excess = len(table) - self.countermove_limit
+        for _ in range(excess):
+            try:
+                oldest_key = next(iter(table))
+            except StopIteration:
+                break
+            table.pop(oldest_key, None)
+
+    def _record_countermove(
+        self,
+        previous_move: chess.Move,
+        reply_move: chess.Move,
+        state: SearchState,
+    ) -> None:
+        key = (previous_move.from_square, previous_move.to_square)
+        if key in state.countermoves:
+            state.countermoves.pop(key, None)
+        state.countermoves[key] = reply_move
+        self._enforce_countermove_limit(state.countermoves)
 
     # ------------------------------------------------------------------
     # Public API
@@ -464,7 +569,16 @@ class TalBotEngine:
 
         limit = self.time_limit if time_limit is None else time_limit
         depth_cap = self.max_depth if max_depth is None else max_depth
-        state = SearchState(start_time=time.time(), time_limit=limit)
+        self._decay_learning_tables()
+        state = SearchState(
+            start_time=time.time(),
+            time_limit=limit,
+            transposition=self._transposition_table,
+            history=self._history_table,
+            countermoves=self._countermove_table,
+            capture_history=self._capture_history_table,
+            eval_cache=self._eval_cache_table,
+        )
 
         best_move: Optional[chess.Move] = None
         best_value = -math.inf
@@ -505,6 +619,12 @@ class TalBotEngine:
                 best_value = value
 
             aspiration = max(25, aspiration // 2)
+
+        self._transposition_table = state.transposition
+        self._history_table = state.history
+        self._countermove_table = state.countermoves
+        self._capture_history_table = state.capture_history
+        self._eval_cache_table = state.eval_cache
 
         if best_move is None:
             try:
@@ -852,7 +972,7 @@ class TalBotEngine:
                 else:
                     self._update_capture_history(attacker_type, victim_type, depth, state, True)
                 if previous_move is not None and score > alpha_orig:
-                    state.countermoves[(previous_move.from_square, previous_move.to_square)] = move
+                    self._record_countermove(previous_move, move, state)
             else:
                 if is_capture:
                     self._update_capture_history(attacker_type, victim_type, depth, state, False)
@@ -870,7 +990,7 @@ class TalBotEngine:
                     self._store_killer(move, ply, state)
                     self._update_history(move, depth, state)
                 if previous_move is not None:
-                    state.countermoves[(previous_move.from_square, previous_move.to_square)] = move
+                    self._record_countermove(previous_move, move, state)
                 break
 
             if alpha >= beta:
@@ -1093,7 +1213,12 @@ class TalBotEngine:
     def _update_history(self, move: chess.Move, depth: int, state: SearchState) -> None:
         key = (move.from_square, move.to_square)
         bonus = depth * depth
-        state.history[key] = state.history.get(key, 0) + bonus
+        value = state.history.get(key, 0) + bonus
+        value = max(-50_000, min(50_000, value))
+        if key in state.history:
+            state.history.pop(key, None)
+        state.history[key] = value
+        self._enforce_history_limit(state.history)
 
     def _update_capture_history(
         self,
@@ -1111,7 +1236,10 @@ class TalBotEngine:
             delta = -max(1, delta // 2)
         value = state.capture_history.get(key, 0) + delta
         value = max(-5_000, min(5_000, value))
+        if key in state.capture_history:
+            state.capture_history.pop(key, None)
         state.capture_history[key] = value
+        self._enforce_capture_history_limit(state.capture_history)
 
     def _can_null_move(self, board: chess.Board) -> bool:
         if board.turn == chess.WHITE:
@@ -1147,7 +1275,10 @@ class TalBotEngine:
             return cached
 
         score = self._evaluate(board)
+        if key in state.eval_cache:
+            state.eval_cache.pop(key, None)
         state.eval_cache[key] = score
+        self._enforce_eval_cache_limit(state.eval_cache)
         return score
 
     def _evaluate(self, board: chess.Board) -> int:
