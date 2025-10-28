@@ -148,11 +148,15 @@ templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 tal_engine = TalBotEngine(
-    max_depth=8,
-    time_limit=7.5,
-    sacrifice_bias=9.5,
-    attack_weight=8.0,
-    mobility_weight=3.0,
+    max_depth=10,
+    time_limit=8.0,
+    sacrifice_bias=9.0,
+    attack_weight=8.5,
+    king_safety_weight=6.5,
+    mobility_weight=3.2,
+    center_weight=2.4,
+    tropism_weight=2.6,
+    threat_weight=3.1,
 )
 _games: Dict[str, chess.Board] = {}
 

@@ -17,7 +17,10 @@ for playing against it online.
 ### Features
 
 - Python chess engine biased toward initiative, king attacks, and selectively sound sacrifices.
-- Alpha-beta search with deep pruning, killer/history heuristics, tapered evaluation, and new pawn/rook/king heuristics to keep play around the 2400 level.
+- Alpha-beta search with deep pruning, killer/history heuristics, tapered evaluation, and new pawn/rook/king heuristics to keep
+  play around the 2400 level.
+- Center control, threat-tracking, and king-tropism evaluation layers that reward only well-supported sacrificial attacks and
+  punish speculative material gifts.
 - FastAPI-powered web server exposing REST endpoints and a responsive front-end with Unicode
   pieces, move log, and a board overlay that locks interaction while the engine is thinking.
 - Coordinate-aware move API that accepts either UCI strings or square-based payloads, protecting the server from malformed client submissions.

@@ -114,6 +114,26 @@ DOUBLED_PAWN_PENALTY = 14
 ROOK_OPEN_FILE_BONUS = 28
 ROOK_SEMI_OPEN_FILE_BONUS = 14
 BISHOP_PAIR_BONUS = 35
+CENTER_SQUARES = [chess.D4, chess.E4, chess.D5, chess.E5]
+EXTENDED_CENTER = [
+    chess.C3,
+    chess.C4,
+    chess.C5,
+    chess.C6,
+    chess.D3,
+    chess.D4,
+    chess.D5,
+    chess.D6,
+    chess.E3,
+    chess.E4,
+    chess.E5,
+    chess.E6,
+    chess.F3,
+    chess.F4,
+    chess.F5,
+    chess.F6,
+]
+TROPISM_PIECES = {chess.QUEEN: 14, chess.ROOK: 10, chess.BISHOP: 9, chess.KNIGHT: 8}
 
 
 @dataclass
@@ -156,6 +176,9 @@ class TalBotEngine:
         attack_weight: float = 7.0,
         king_safety_weight: float = 6.0,
         mobility_weight: float = 3.0,
+        center_weight: float = 2.0,
+        tropism_weight: float = 2.0,
+        threat_weight: float = 2.5,
     ) -> None:
         self.max_depth = max_depth
         self.time_limit = time_limit
@@ -163,6 +186,9 @@ class TalBotEngine:
         self.attack_weight = attack_weight
         self.king_safety_weight = king_safety_weight
         self.mobility_weight = mobility_weight
+        self.center_weight = center_weight
+        self.tropism_weight = tropism_weight
+        self.threat_weight = threat_weight
 
     # ------------------------------------------------------------------
     # Public API
@@ -446,13 +472,6 @@ class TalBotEngine:
 
         moves = list(board.legal_moves)
 
-        def gives_check(move: chess.Move) -> bool:
-            board.push(move)
-            try:
-                return board.is_check()
-            finally:
-                board.pop()
-
         def move_score(move: chess.Move, order_index: int) -> int:
             if move == hash_move:
                 return 1_000_000
@@ -467,7 +486,7 @@ class TalBotEngine:
             history_score = state.history.get((move.from_square, move.to_square), 0)
             if move.promotion:
                 history_score += 10_000
-            if gives_check(move):
+            if self._gives_check(board, move):
                 history_score += 5_000
             return history_score
 
@@ -480,11 +499,7 @@ class TalBotEngine:
     def _generate_tactical_moves(self, board: chess.Board) -> Iterable[chess.Move]:
         moves = list(board.legal_moves)
         for move in moves:
-            board.push(move)
-            try:
-                gives_check = board.is_check()
-            finally:
-                board.pop()
+            gives_check = self._gives_check(board, move)
             if board.is_capture(move) or gives_check or move.promotion is not None:
                 if self._see_ge(board, move, 0):
                     yield move
@@ -499,6 +514,23 @@ class TalBotEngine:
         victim_val = PIECE_VALUES.get(victim.piece_type, 0) if victim else 0
         attacker_val = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
         return victim_val - attacker_val >= threshold
+
+    def _gives_check(self, board: chess.Board, move: chess.Move) -> bool:
+        pushed = False
+        try:
+            board.push(move)
+            pushed = True
+            return board.is_check()
+        except Exception:
+            analysis = board.copy(stack=False)
+            try:
+                analysis.push(move)
+            except Exception:
+                return False
+            return analysis.is_check()
+        finally:
+            if pushed:
+                board.pop()
 
     def _store_killer(self, move: chess.Move, ply: int, state: SearchState) -> None:
         killers = state.killers.setdefault(ply, [])
@@ -544,6 +576,9 @@ class TalBotEngine:
         pawn_structure = self._pawn_structure(board)
         rook_activity = self._rook_activity(board)
         bishop_pair = self._bishop_pair(board)
+        center_control = self._center_control(board)
+        threats = self._threat_map(board)
+        tropism_white, tropism_black = self._king_tropism(board)
         sacrifice = self._sacrifice_bias_eval(
             board,
             material_white=self._material_total(board, chess.WHITE),
@@ -552,6 +587,10 @@ class TalBotEngine:
             attack_black=attack_black,
             king_white=king_safety_white,
             king_black=king_safety_black,
+            threats=threats,
+            center=center_control,
+            tropism_white=tropism_white,
+            tropism_black=tropism_black,
         )
         tempo = 12 if board.turn == chess.WHITE else -12
 
@@ -561,6 +600,9 @@ class TalBotEngine:
             + mobility
             + (attack_white - attack_black) * self.attack_weight
             + (king_safety_white - king_safety_black) * self.king_safety_weight
+            + center_control * self.center_weight
+            + (tropism_white - tropism_black) * self.tropism_weight
+            + threats * self.threat_weight
             + sacrifice
             + pawn_structure
             + rook_activity
@@ -706,6 +748,81 @@ class TalBotEngine:
             score -= BISHOP_PAIR_BONUS
         return score
 
+    def _center_control(self, board: chess.Board) -> int:
+        score = 0
+        for square in EXTENDED_CENTER:
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            bonus = 12 if square in CENTER_SQUARES else 6
+            if piece.color == chess.WHITE:
+                score += bonus
+            else:
+                score -= bonus
+
+        for square in CENTER_SQUARES:
+            white_attackers = len(board.attackers(chess.WHITE, square))
+            black_attackers = len(board.attackers(chess.BLACK, square))
+            score += 4 * (white_attackers - black_attackers)
+        return score
+
+    def _king_tropism(self, board: chess.Board) -> Tuple[int, int]:
+        def tropism(color: chess.Color) -> int:
+            enemy_king = board.king(not color)
+            if enemy_king is None:
+                return 0
+            enemy_file = chess.square_file(enemy_king)
+            enemy_rank = chess.square_rank(enemy_king)
+            pressure = 0
+            for square in board.pieces(chess.PAWN, color):
+                file_diff = abs(chess.square_file(square) - enemy_file)
+                rank_diff = abs(chess.square_rank(square) - enemy_rank)
+                if rank_diff < 3 and file_diff <= 1:
+                    pressure += 2
+            for square, piece in board.piece_map().items():
+                if piece.color != color or piece.piece_type not in TROPISM_PIECES:
+                    continue
+                distance = abs(chess.square_file(square) - enemy_file) + abs(
+                    chess.square_rank(square) - enemy_rank
+                )
+                pressure += max(0, TROPISM_PIECES[piece.piece_type] - 3 * distance)
+            return pressure
+
+        return tropism(chess.WHITE), tropism(chess.BLACK)
+
+    def _threat_map(self, board: chess.Board) -> int:
+        score = 0
+        for square, piece in board.piece_map().items():
+            enemy = not piece.color
+            attackers = len(board.attackers(enemy, square))
+            defenders = len(board.attackers(piece.color, square))
+            value = PIECE_VALUES.get(piece.piece_type, 0)
+            if attackers > defenders:
+                swing = min(attackers - defenders, 2)
+                penalty = (value * swing) // 4 + 6
+                score += -penalty if piece.color == chess.WHITE else penalty
+
+        for square in chess.SquareSet(board.occupied_co[chess.BLACK]):
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            attackers = len(board.attackers(chess.WHITE, square))
+            defenders = len(board.attackers(chess.BLACK, square))
+            if attackers > defenders:
+                gain = PIECE_VALUES.get(piece.piece_type, 0) // 6 + 8
+                score += gain
+
+        for square in chess.SquareSet(board.occupied_co[chess.WHITE]):
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            attackers = len(board.attackers(chess.BLACK, square))
+            defenders = len(board.attackers(chess.WHITE, square))
+            if attackers > defenders:
+                gain = PIECE_VALUES.get(piece.piece_type, 0) // 6 + 8
+                score -= gain
+        return score
+
     def _king_safety(self, board: chess.Board) -> Tuple[int, int]:
         def score(color: chess.Color) -> int:
             king_square = board.king(color)
@@ -810,6 +927,10 @@ class TalBotEngine:
         attack_black: int,
         king_white: int,
         king_black: int,
+        threats: int,
+        center: int,
+        tropism_white: int,
+        tropism_black: int,
     ) -> int:
         side = chess.WHITE if board.turn == chess.WHITE else chess.BLACK
         own_material = material_white if side == chess.WHITE else material_black
@@ -821,10 +942,24 @@ class TalBotEngine:
 
         attack_advantage = (attack_white - attack_black) if side == chess.WHITE else (attack_black - attack_white)
         king_pressure = (king_white - king_black) if side == chess.WHITE else (king_black - king_white)
-        combined = attack_advantage + king_pressure
-        if combined <= 0:
-            return material_deficit // 4
-        return int(self.sacrifice_bias * combined / 10 + material_deficit / 8)
+        threat_balance = threats if side == chess.WHITE else -threats
+        center_swing = center if side == chess.WHITE else -center
+        tropism_delta = (tropism_white - tropism_black) if side == chess.WHITE else (tropism_black - tropism_white)
+
+        combined = (
+            0.6 * attack_advantage
+            + 0.5 * king_pressure
+            + 0.4 * threat_balance
+            + 0.3 * tropism_delta
+            + 0.2 * center_swing
+        )
+
+        guardrail = max(0, -material_deficit / 6)
+        if combined <= guardrail:
+            return material_deficit // 5
+
+        bonus = self.sacrifice_bias * combined / 12 + tropism_delta * 0.4
+        return int(bonus + material_deficit / 10)
 
 
 __all__ = ["TalBotEngine"]
