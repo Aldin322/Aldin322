@@ -162,6 +162,7 @@ class SearchState:
     nodes: int = 0
     stop: bool = False
     generation: int = 0
+    eval_cache: Dict[int, int] = field(default_factory=dict)
 
     def time_exceeded(self) -> bool:
         if self.stop:
@@ -455,11 +456,25 @@ class TalBotEngine:
                 return -MATE_SCORE + depth, None
             return 0, None
 
+        root_eval: Optional[int] = None
+        if not board.is_check():
+            root_eval = self._evaluate_cached(board, state)
+
         for move in moves:
             if state.time_exceeded():
                 break
             board.push(move)
-            value = -self._pv_search(board, depth - 1, -beta, -alpha, state, 1, 0, 0)
+            value = -self._pv_search(
+                board,
+                depth - 1,
+                -beta,
+                -alpha,
+                state,
+                1,
+                root_eval,
+                0,
+                0,
+            )
             board.pop()
 
             if state.time_exceeded():
@@ -489,13 +504,14 @@ class TalBotEngine:
         beta: int,
         state: SearchState,
         ply: int,
+        parent_eval: Optional[int],
         check_extensions: int,
         sacrifice_extensions: int,
     ) -> int:
         if state.time_exceeded():
             return 0
         if ply >= MAX_PLY:
-            return self._evaluate(board)
+            return self._evaluate_cached(board, state)
 
         alpha = max(alpha, -MATE_SCORE + ply)
         beta = min(beta, MATE_SCORE - ply)
@@ -534,9 +550,22 @@ class TalBotEngine:
 
         state.nodes += 1
 
-        static_eval_parent: Optional[int] = None
-        if depth <= 3 and not in_check:
-            static_eval_parent = self._evaluate(board)
+        current_static: Optional[int] = None
+
+        def ensure_static() -> Optional[int]:
+            nonlocal current_static
+            if current_static is None and not in_check:
+                current_static = self._evaluate_cached(board, state)
+            return current_static
+
+        improving = False
+        if not in_check:
+            ensure_static()
+            if current_static is not None:
+                if parent_eval is None:
+                    improving = True
+                else:
+                    improving = current_static >= parent_eval - 25
 
         tt_move = entry.move if entry else None
         if (
@@ -552,6 +581,7 @@ class TalBotEngine:
                 beta,
                 state,
                 ply,
+                parent_eval,
                 check_extensions,
                 sacrifice_extensions,
             )
@@ -561,6 +591,7 @@ class TalBotEngine:
 
         # Null move pruning
         if depth >= 3 and not in_check and self._can_null_move(board):
+            parent_static_for_children = ensure_static()
             board.push(chess.Move.null())
             null_score = -self._pv_search(
                 board,
@@ -569,6 +600,7 @@ class TalBotEngine:
                 -beta + 1,
                 state,
                 ply + 1,
+                parent_static_for_children,
                 0,
                 0,
             )
@@ -580,10 +612,12 @@ class TalBotEngine:
         if not moves:
             if in_check:
                 return -MATE_SCORE + ply
-            return self._evaluate(board)
+            return ensure_static() or self._evaluate_cached(board, state)
 
         best_value = -MATE_SCORE
         best_move: Optional[chess.Move] = None
+
+        quiet_count = 0
 
         for index, move in enumerate(moves):
             if state.time_exceeded():
@@ -600,7 +634,7 @@ class TalBotEngine:
             next_sacrifice_extensions = sacrifice_extensions + 1 if is_sacrifice_move else 0
 
             if (
-                static_eval_parent is not None
+                current_static is not None
                 and depth <= 2
                 and index > 6
                 and not is_capture
@@ -608,7 +642,7 @@ class TalBotEngine:
                 and move.promotion is None
             ):
                 futility_margin = 120 + 60 * depth
-                if static_eval_parent + futility_margin <= alpha:
+                if current_static + futility_margin <= alpha:
                     board.pop()
                     continue
 
@@ -622,9 +656,13 @@ class TalBotEngine:
             ):
                 base = math.log(depth) * math.log(index + 1)
                 reduction = int(base / 1.7)
+                if improving:
+                    reduction = max(0, reduction - 1)
                 if history_score > 1500:
                     reduction = max(0, reduction - 1)
-                elif history_score < 0:
+                elif history_score < 0 and reduction < depth - 1:
+                    reduction += 1
+                if not improving and reduction < depth - 1:
                     reduction += 1
                 reduction = min(reduction, depth - 1)
 
@@ -642,14 +680,25 @@ class TalBotEngine:
             if new_depth < 0:
                 new_depth = 0
 
+            quiet = not is_capture and not gives_check and move.promotion is None
+            if quiet:
+                quiet_count += 1
+                if (
+                    depth <= 2
+                    and quiet_count > 6
+                    and not improving
+                    and current_static is not None
+                    and current_static + 90 * depth + 20 * quiet_count <= alpha
+                ):
+                    board.pop()
+                    continue
+
             if (
                 new_depth <= 2
-                and not is_capture
-                and not gives_check
-                and move.promotion is None
+                and quiet
                 and not in_check
             ):
-                static_eval = self._evaluate(board)
+                static_eval = self._evaluate_cached(board, state)
                 futility_margin = 150 + 100 * new_depth
                 if static_eval + futility_margin <= alpha:
                     board.pop()
@@ -663,6 +712,7 @@ class TalBotEngine:
                     -alpha,
                     state,
                     ply + 1,
+                    current_static,
                     next_check_extensions,
                     next_sacrifice_extensions,
                 )
@@ -674,6 +724,7 @@ class TalBotEngine:
                     -alpha,
                     state,
                     ply + 1,
+                    current_static,
                     next_check_extensions,
                     next_sacrifice_extensions,
                 )
@@ -685,6 +736,7 @@ class TalBotEngine:
                         -alpha,
                         state,
                         ply + 1,
+                        current_static,
                         next_check_extensions,
                         next_sacrifice_extensions,
                     )
@@ -716,7 +768,7 @@ class TalBotEngine:
                 break
 
         if best_move is None:
-            return self._evaluate(board)
+            return ensure_static() or self._evaluate_cached(board, state)
 
         flag = "exact"
         if best_value <= alpha_orig:
@@ -740,12 +792,12 @@ class TalBotEngine:
         ply: int,
     ) -> int:
         if ply >= MAX_PLY:
-            return self._evaluate(board)
+            return self._evaluate_cached(board, state)
         if board.is_fivefold_repetition() or board.is_repetition(3):
             return 0
         if board.can_claim_draw() and not board.is_check():
             return 0
-        stand_pat = self._evaluate(board)
+        stand_pat = self._evaluate_cached(board, state)
         if stand_pat >= beta:
             return beta
         if stand_pat > alpha:
@@ -755,6 +807,17 @@ class TalBotEngine:
         for move in captures:
             if state.time_exceeded():
                 break
+            delta_margin = 0
+            if board.is_capture(move):
+                victim = board.piece_at(move.to_square)
+                if victim is not None:
+                    delta_margin = PIECE_VALUES.get(victim.piece_type, 0)
+                elif board.is_en_passant(move):
+                    delta_margin = PIECE_VALUES[chess.PAWN]
+            else:
+                delta_margin = PIECE_VALUES[chess.QUEEN] // 2
+            if stand_pat + delta_margin + 200 < alpha:
+                continue
             board.push(move)
             score = -self._quiescence(board, -beta, -alpha, state, ply + 1)
             board.pop()
@@ -916,6 +979,26 @@ class TalBotEngine:
     # ------------------------------------------------------------------
     # Evaluation
     # ------------------------------------------------------------------
+    def _evaluate_cached(self, board: chess.Board, state: SearchState) -> int:
+        """Return a cached static evaluation for the given board."""
+
+        key = hash(
+            (
+                self._hash(board),
+                board.turn,
+                board.castling_rights,
+                board.ep_square if board.ep_square is not None else -1,
+                board.halfmove_clock,
+            )
+        )
+        cached = state.eval_cache.get(key)
+        if cached is not None:
+            return cached
+
+        score = self._evaluate(board)
+        state.eval_cache[key] = score
+        return score
+
     def _evaluate(self, board: chess.Board) -> int:
         if board.is_checkmate():
             return -MATE_SCORE
