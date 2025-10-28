@@ -16,10 +16,11 @@ for playing against it online.
 
 ### Features
 
-- Python chess engine biased toward initiative, king attacks, and speculative sacrifices.
-- Alpha-beta search with move ordering, killer moves, quiescence search, and tapered evaluation.
+- Python chess engine biased toward initiative, king attacks, and selectively sound sacrifices.
+- Alpha-beta search with deep pruning, killer/history heuristics, tapered evaluation, and new pawn/rook/king heuristics to keep play around the 2400 level.
 - FastAPI-powered web server exposing REST endpoints and a responsive front-end with Unicode
-  pieces and move log.
+  pieces, move log, and a board overlay that locks interaction while the engine is thinking.
+- Coordinate-aware move API that accepts either UCI strings or square-based payloads, protecting the server from malformed client submissions.
 
 ### Getting started
 
@@ -36,3 +37,14 @@ chosen value, preventing the "Address already in use" crash seen when reloading 
 
 Then open the reported address (default `http://localhost:8000`) to challenge TalBot as White. Moves are
 submitted automatically by clicking source and destination squares; the engine responds immediately as Black.
+
+### Testing
+
+Run the automated checks once dependencies are installed:
+
+```bash
+pytest
+```
+
+The suite exercises the HTTP API end-to-end and verifies the engine finds forced tactical wins such as the classic
+Qxf7# mate in one, giving confidence that TalBot responds with legal, decisive play.

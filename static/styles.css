@@ -125,6 +125,7 @@ main {
 
 .board-overlay.visible {
   display: flex;
+  pointer-events: auto;
 }
 
 @media (max-width: 900px) {

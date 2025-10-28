@@ -122,7 +122,7 @@ function onSquareClick(square) {
     const moves = legalMoves[selectedSquare] || [];
     const chosenMove = moves.find((move) => move.to === square);
     if (chosenMove) {
-      sendMove(chosenMove.uci);
+      sendMove(chosenMove);
       return;
     }
     if (isWhitePiece) {
@@ -141,7 +141,25 @@ function onSquareClick(square) {
   }
 }
 
-async function sendMove(uci) {
+function buildMovePayload(move) {
+  const payload = {
+    game_id: currentGame.game_id,
+    source: move.source,
+    target: move.to,
+  };
+
+  if (move.uci) {
+    payload.uci = move.uci;
+  }
+
+  if (move.promotion) {
+    payload.promotion = move.promotion;
+  }
+
+  return payload;
+}
+
+async function sendMove(move) {
   if (!currentGame) {
     return;
   }
@@ -150,7 +168,7 @@ async function sendMove(uci) {
     const response = await fetch('/api/move', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ game_id: currentGame.game_id, uci }),
+      body: JSON.stringify(buildMovePayload(move)),
     });
     if (!response.ok) {
       const error = await response.json();

@@ -21,9 +21,49 @@ from pydantic import BaseModel
 from talbot import TalBotEngine
 
 
+PROMOTION_FROM_SYMBOL = {
+    "q": chess.QUEEN,
+    "r": chess.ROOK,
+    "b": chess.BISHOP,
+    "n": chess.KNIGHT,
+}
+PROMOTION_TO_SYMBOL = {value: key for key, value in PROMOTION_FROM_SYMBOL.items()}
+
+
 class MoveRequest(BaseModel):
     game_id: str
-    uci: str
+    uci: Optional[str] = None
+    source: Optional[str] = None
+    target: Optional[str] = None
+    promotion: Optional[str] = None
+
+    def resolve(self, board: chess.Board) -> chess.Move:
+        """Convert the request payload into a :class:`~chess.Move`."""
+
+        if self.uci:
+            return chess.Move.from_uci(self.uci.lower())
+
+        if not self.source or not self.target:
+            raise ValueError("Move request must include either a UCI string or source/target squares")
+
+        try:
+            from_square = chess.parse_square(self.source.lower())
+            to_square = chess.parse_square(self.target.lower())
+        except ValueError as exc:
+            raise ValueError("Invalid square coordinates") from exc
+
+        promotion_piece: Optional[int] = None
+        if self.promotion:
+            promo_key = self.promotion.lower()
+            promotion_piece = PROMOTION_FROM_SYMBOL.get(promo_key)
+            if promotion_piece is None:
+                raise ValueError("Invalid promotion piece")
+
+        move = chess.Move(from_square, to_square, promotion=promotion_piece)
+        if promotion_piece and move.promotion is None:
+            # The promotion specification is inconsistent with the move geometry.
+            raise ValueError("Promotion piece is not valid for the supplied move")
+        return move
 
 
 class MoveRecord(BaseModel):
@@ -81,9 +121,10 @@ def serialize_state(game_id: str, board: chess.Board) -> GameState:
             target = chess.square_name(move.to_square)
             moves = legal_moves.setdefault(source, [])
             moves.append({
+                "source": source,
                 "to": target,
                 "uci": move.uci(),
-                "promotion": move.promotion,
+                "promotion": PROMOTION_TO_SYMBOL.get(move.promotion),
             })
     return GameState(
         game_id=game_id,
@@ -144,9 +185,9 @@ async def play_move(move: MoveRequest) -> GameState:
         raise HTTPException(status_code=404, detail="Game not found")
 
     try:
-        chess_move = chess.Move.from_uci(move.uci)
-    except ValueError as exc:  # pragma: no cover - guard clause
-        raise HTTPException(status_code=400, detail="Invalid move format") from exc
+        chess_move = move.resolve(board)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if chess_move not in board.legal_moves:
         raise HTTPException(status_code=400, detail="Illegal move")

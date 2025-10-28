@@ -108,6 +108,13 @@ PIECE_SQUARE_TABLES = {
     chess.QUEEN: QUEEN_TABLE,
 }
 
+PASSED_PAWN_BONUS = [0, 18, 35, 60, 95, 150, 230, 0]
+ISOLATED_PAWN_PENALTY = 18
+DOUBLED_PAWN_PENALTY = 14
+ROOK_OPEN_FILE_BONUS = 28
+ROOK_SEMI_OPEN_FILE_BONUS = 14
+BISHOP_PAIR_BONUS = 35
+
 
 @dataclass
 class TTEntry:
@@ -182,11 +189,24 @@ class TalBotEngine:
 
             alpha = -MATE_SCORE
             beta = MATE_SCORE
+            window = aspiration
             if best_value not in (-math.inf, math.inf):
-                alpha = max(alpha, int(best_value) - aspiration)
-                beta = min(beta, int(best_value) + aspiration)
+                alpha = max(alpha, int(best_value) - window)
+                beta = min(beta, int(best_value) + window)
 
-            value, move = self._search_root(board, depth, alpha, beta, state, best_move)
+            while True:
+                value, move = self._search_root(board, depth, alpha, beta, state, best_move)
+
+                if state.time_exceeded():
+                    break
+
+                if value <= alpha and alpha > -MATE_SCORE:
+                    alpha = max(-MATE_SCORE, alpha - max(50, window * 2))
+                    continue
+                if value >= beta and beta < MATE_SCORE:
+                    beta = min(MATE_SCORE, beta + max(50, window * 2))
+                    continue
+                break
 
             if state.time_exceeded():
                 break
@@ -328,7 +348,7 @@ class TalBotEngine:
                 reduction = 1 + (1 if index > 6 else 0)
 
             new_depth = depth - 1
-            if gives_check:
+            if gives_check and depth > 1:
                 new_depth += 1
             if new_depth < 0:
                 new_depth = 0
@@ -505,6 +525,9 @@ class TalBotEngine:
         mobility = self._mobility(board) * self.mobility_weight
         king_safety_white, king_safety_black = self._king_safety(board)
         attack_white, attack_black = self._attack_pressure(board)
+        pawn_structure = self._pawn_structure(board)
+        rook_activity = self._rook_activity(board)
+        bishop_pair = self._bishop_pair(board)
         sacrifice = self._sacrifice_bias_eval(
             board,
             material_white=self._material_total(board, chess.WHITE),
@@ -523,6 +546,9 @@ class TalBotEngine:
             + (attack_white - attack_black) * self.attack_weight
             + (king_safety_white - king_safety_black) * self.king_safety_weight
             + sacrifice
+            + pawn_structure
+            + rook_activity
+            + bishop_pair
             + tempo
         )
         return score if board.turn == chess.WHITE else -score
@@ -565,18 +591,104 @@ class TalBotEngine:
             chess.BISHOP: 1,
             chess.ROOK: 2,
             chess.QUEEN: 4,
+            chess.KING: 0,
         }
         total = sum(phase_weights[p.piece_type] for p in board.piece_map().values())
         return min(1.0, total / 24.0)
 
     def _mobility(self, board: chess.Board) -> int:
-        turn = board.turn
-        board.turn = chess.WHITE
-        white_moves = sum(1 for _ in board.legal_moves)
-        board.turn = chess.BLACK
-        black_moves = sum(1 for _ in board.legal_moves)
-        board.turn = turn
-        return white_moves - black_moves
+        white_attacks = 0
+        black_attacks = 0
+        for square, piece in board.piece_map().items():
+            attack_count = len(board.attacks(square))
+            if piece.color == chess.WHITE:
+                white_attacks += attack_count
+            else:
+                black_attacks += attack_count
+        return white_attacks - black_attacks
+
+    def _pawn_structure(self, board: chess.Board) -> int:
+        score = 0
+        white_files = [0] * 8
+        black_files = [0] * 8
+        for square in board.pieces(chess.PAWN, chess.WHITE):
+            white_files[chess.square_file(square)] += 1
+        for square in board.pieces(chess.PAWN, chess.BLACK):
+            black_files[chess.square_file(square)] += 1
+
+        def is_passed(square: int, color: chess.Color) -> bool:
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            direction = 1 if color == chess.WHITE else -1
+            enemy = chess.BLACK if color == chess.WHITE else chess.WHITE
+            r = rank + direction
+            while 0 <= r < 8:
+                for df in (-1, 0, 1):
+                    file_sq = file + df
+                    if not 0 <= file_sq < 8:
+                        continue
+                    sq = chess.square(file_sq, r)
+                    piece = board.piece_at(sq)
+                    if piece and piece.color == enemy and piece.piece_type == chess.PAWN:
+                        return False
+                r += direction
+            return True
+
+        for square in board.pieces(chess.PAWN, chess.WHITE):
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            if white_files[file] > 1:
+                score -= DOUBLED_PAWN_PENALTY
+            neighbors = []
+            if file > 0:
+                neighbors.append(white_files[file - 1])
+            if file < 7:
+                neighbors.append(white_files[file + 1])
+            if neighbors and all(count == 0 for count in neighbors):
+                score -= ISOLATED_PAWN_PENALTY
+            if is_passed(square, chess.WHITE):
+                score += PASSED_PAWN_BONUS[rank]
+
+        for square in board.pieces(chess.PAWN, chess.BLACK):
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            if black_files[file] > 1:
+                score += DOUBLED_PAWN_PENALTY
+            neighbors = []
+            if file > 0:
+                neighbors.append(black_files[file - 1])
+            if file < 7:
+                neighbors.append(black_files[file + 1])
+            if neighbors and all(count == 0 for count in neighbors):
+                score += ISOLATED_PAWN_PENALTY
+            if is_passed(square, chess.BLACK):
+                score -= PASSED_PAWN_BONUS[7 - rank]
+
+        return score
+
+    def _rook_activity(self, board: chess.Board) -> int:
+        score = 0
+        for color in (chess.WHITE, chess.BLACK):
+            for square in board.pieces(chess.ROOK, color):
+                file = chess.square_file(square)
+                file_mask = chess.BB_FILES[file]
+                friendly_pawns = board.pieces(chess.PAWN, color) & file_mask
+                enemy_pawns = board.pieces(chess.PAWN, not color) & file_mask
+                bonus = 0
+                if not friendly_pawns and not enemy_pawns:
+                    bonus = ROOK_OPEN_FILE_BONUS
+                elif not friendly_pawns:
+                    bonus = ROOK_SEMI_OPEN_FILE_BONUS
+                score += bonus if color == chess.WHITE else -bonus
+        return score
+
+    def _bishop_pair(self, board: chess.Board) -> int:
+        score = 0
+        if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+            score += BISHOP_PAIR_BONUS
+        if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+            score -= BISHOP_PAIR_BONUS
+        return score
 
     def _king_safety(self, board: chess.Board) -> Tuple[int, int]:
         def score(color: chess.Color) -> int:
