@@ -11,6 +11,7 @@ import chess
 
 MATE_SCORE = 1_000_000
 MATE_THRESHOLD = MATE_SCORE - 1_000
+MAX_PLY = 128
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -179,6 +180,7 @@ class TalBotEngine:
         center_weight: float = 2.0,
         tropism_weight: float = 2.0,
         threat_weight: float = 2.5,
+        max_check_extensions: int = 2,
     ) -> None:
         self.max_depth = max_depth
         self.time_limit = time_limit
@@ -189,6 +191,7 @@ class TalBotEngine:
         self.center_weight = center_weight
         self.tropism_weight = tropism_weight
         self.threat_weight = threat_weight
+        self.max_check_extensions = max(0, max_check_extensions)
 
     # ------------------------------------------------------------------
     # Public API
@@ -279,7 +282,7 @@ class TalBotEngine:
             if state.time_exceeded():
                 break
             board.push(move)
-            value = -self._pv_search(board, depth - 1, -beta, -alpha, state, 1)
+            value = -self._pv_search(board, depth - 1, -beta, -alpha, state, 1, 0)
             board.pop()
 
             if state.time_exceeded():
@@ -305,9 +308,12 @@ class TalBotEngine:
         beta: int,
         state: SearchState,
         ply: int,
+        check_extensions: int,
     ) -> int:
         if state.time_exceeded():
             return 0
+        if ply >= MAX_PLY:
+            return self._evaluate(board)
 
         key = self._hash(board)
         entry = state.transposition.get(key)
@@ -339,7 +345,15 @@ class TalBotEngine:
         # Null move pruning
         if depth >= 3 and not in_check and self._can_null_move(board):
             board.push(chess.Move.null())
-            null_score = -self._pv_search(board, depth - 1 - 2, -beta, -beta + 1, state, ply + 1)
+            null_score = -self._pv_search(
+                board,
+                depth - 1 - 2,
+                -beta,
+                -beta + 1,
+                state,
+                ply + 1,
+                0,
+            )
             board.pop()
             if null_score >= beta:
                 return beta
@@ -363,6 +377,7 @@ class TalBotEngine:
             board.push(move)
 
             gives_check = board.is_check()
+            next_check_extensions = check_extensions + 1 if gives_check else 0
 
             reduction = 0
             if (
@@ -374,9 +389,8 @@ class TalBotEngine:
             ):
                 reduction = 1 + (1 if index > 6 else 0)
 
-            new_depth = depth - 1
-            if gives_check and depth > 1:
-                new_depth += 1
+            extension = 1 if gives_check and depth > 1 and next_check_extensions <= self.max_check_extensions else 0
+            new_depth = depth - 1 + extension
             if new_depth < 0:
                 new_depth = 0
 
@@ -394,11 +408,35 @@ class TalBotEngine:
                     continue
 
             if index == 0:
-                score = -self._pv_search(board, new_depth, -beta, -alpha, state, ply + 1)
+                score = -self._pv_search(
+                    board,
+                    new_depth,
+                    -beta,
+                    -alpha,
+                    state,
+                    ply + 1,
+                    next_check_extensions,
+                )
             else:
-                score = -self._pv_search(board, max(0, new_depth - reduction), -alpha - 1, -alpha, state, ply + 1)
+                score = -self._pv_search(
+                    board,
+                    max(0, new_depth - reduction),
+                    -alpha - 1,
+                    -alpha,
+                    state,
+                    ply + 1,
+                    next_check_extensions,
+                )
                 if score > alpha:
-                    score = -self._pv_search(board, new_depth, -beta, -alpha, state, ply + 1)
+                    score = -self._pv_search(
+                        board,
+                        new_depth,
+                        -beta,
+                        -alpha,
+                        state,
+                        ply + 1,
+                        next_check_extensions,
+                    )
 
             board.pop()
 
@@ -438,6 +476,8 @@ class TalBotEngine:
         state: SearchState,
         ply: int,
     ) -> int:
+        if ply >= MAX_PLY:
+            return self._evaluate(board)
         stand_pat = self._evaluate(board)
         if stand_pat >= beta:
             return beta
