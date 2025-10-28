@@ -333,9 +333,10 @@ class TalBotEngine:
                 break
 
             is_capture = board.is_capture(move)
-            gives_check = board.gives_check(move)
 
             board.push(move)
+
+            gives_check = board.is_check()
 
             reduction = 0
             if (
@@ -443,6 +444,15 @@ class TalBotEngine:
     ) -> List[chess.Move]:
         killers = state.killers.get(ply, [])
 
+        moves = list(board.legal_moves)
+
+        def gives_check(move: chess.Move) -> bool:
+            board.push(move)
+            try:
+                return board.is_check()
+            finally:
+                board.pop()
+
         def move_score(move: chess.Move, order_index: int) -> int:
             if move == hash_move:
                 return 1_000_000
@@ -457,19 +467,25 @@ class TalBotEngine:
             history_score = state.history.get((move.from_square, move.to_square), 0)
             if move.promotion:
                 history_score += 10_000
-            if board.gives_check(move):
+            if gives_check(move):
                 history_score += 5_000
             return history_score
 
         scored: List[Tuple[int, chess.Move]] = []
-        for idx, mv in enumerate(board.legal_moves):
+        for idx, mv in enumerate(moves):
             scored.append((move_score(mv, idx), mv))
         scored.sort(key=lambda item: item[0], reverse=True)
         return [mv for _, mv in scored]
 
     def _generate_tactical_moves(self, board: chess.Board) -> Iterable[chess.Move]:
-        for move in board.legal_moves:
-            if board.is_capture(move) or board.gives_check(move) or move.promotion is not None:
+        moves = list(board.legal_moves)
+        for move in moves:
+            board.push(move)
+            try:
+                gives_check = board.is_check()
+            finally:
+                board.pop()
+            if board.is_capture(move) or gives_check or move.promotion is not None:
                 if self._see_ge(board, move, 0):
                     yield move
 
