@@ -28,8 +28,11 @@ SEGMENT_HIGHLIGHT = (255, 200, 120)
 SEGMENT_HIGHLIGHT_ARROW = (255, 160, 80)
 EDGE_VECTOR_COLOR = (255, 120, 120)
 EDGE_VECTOR_HEAD = (255, 190, 140)
+EDGE_PROGRESS_COLOR = (255, 240, 180)
+EDGE_PROGRESS_HEAD = (255, 220, 140)
 TILE_COLOR_BASE = (80, 200, 180, 90)
 TILE_COLOR_ALT = (60, 170, 150, 120)
+TILE_COLOR_PROGRESS = (120, 240, 210, 160)
 PANEL_COLOR = (15, 15, 24, 230)
 PANEL_BORDER = (110, 110, 150)
 
@@ -96,17 +99,28 @@ class EdgeAnimator:
     def reset(self) -> None:
         self.time = 0.0
 
-    def step(self, dt: float, count: int) -> Tuple[Optional[int], int]:
+    def step(self, dt: float, count: int) -> Tuple[Optional[int], int, float, float]:
+        """Advance the animation clock.
+
+        Returns the highlighted edge index, the number of completed edges,
+        the eased progress along the current edge (0–1), and the global
+        traversal fraction across all edges.
+        """
+
         if count <= 0:
             self.reset()
-            return None, 0
+            return None, 0, 0.0, 0.0
+
         total_duration = self.dwell * count
         self.time = (self.time + dt) % total_duration
         raw = self.time / self.dwell
         index = int(raw)
         index = min(index, count - 1)
+        linear_progress = raw - index
+        eased_progress = ease_in_out_sine(linear_progress)
         active = index + 1
-        return index, active
+        global_fraction = (index + eased_progress) / max(count, 1)
+        return index, active, eased_progress, global_fraction
 
 
 @dataclass
@@ -172,6 +186,12 @@ def lerp(a: Vector, b: Vector, t: float) -> Vector:
     return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
 
 
+def ease_in_out_sine(t: float) -> float:
+    """Smooth easing to keep the pacing gentle and intuitive."""
+    t = max(0.0, min(1.0, t))
+    return 0.5 - 0.5 * math.cos(math.pi * t)
+
+
 def draw_axes(surface: pygame.Surface) -> None:
     pygame.draw.line(surface, AXIS_COLOR, (0, HEIGHT // 2), (WIDTH, HEIGHT // 2), 2)
     pygame.draw.line(surface, AXIS_COLOR, (WIDTH // 2, 0), (WIDTH // 2, HEIGHT), 2)
@@ -207,11 +227,32 @@ def draw_arrow_head(surface: pygame.Surface, tip: Point, direction: Vector, colo
     pygame.draw.polygon(surface, color, [tip, left, right])
 
 
+def draw_edge_progress(
+    surface: pygame.Surface,
+    start: Point,
+    end: Point,
+    progress: float,
+) -> None:
+    if progress <= 0:
+        return
+    progress = max(0.0, min(1.0, progress))
+    sx, sy = start
+    ex, ey = end
+    px = sx + (ex - sx) * progress
+    py = sy + (ey - sy) * progress
+    pygame.draw.line(surface, EDGE_PROGRESS_COLOR, start, (px, py), 6)
+    direction = (ex - sx, ey - sy)
+    tip = (px, py)
+    draw_arrow_head(surface, tip, direction, EDGE_PROGRESS_HEAD)
+    pygame.draw.circle(surface, EDGE_PROGRESS_HEAD, (int(px), int(py)), 8)
+
+
 def draw_polygon(
     surface: pygame.Surface,
     points: Sequence[Point],
     closed: bool,
     highlight_edge: Optional[int] = None,
+    edge_progress: float = 0.0,
 ) -> None:
     if len(points) >= 3 and closed:
         polygon_points = [tuple(map(int, p)) for p in points]
@@ -234,6 +275,8 @@ def draw_polygon(
             place = lerp(start, end, 0.85)
             direction = (end[0] - start[0], end[1] - start[1])
             draw_arrow_head(surface, place, direction, arrow_color)
+            if i == highlight_edge:
+                draw_edge_progress(surface, start, end, edge_progress)
     elif len(points) >= 2:
         pygame.draw.lines(surface, POLYGON_BORDER, False, points, 2)
 
@@ -243,22 +286,37 @@ def draw_polygon(
         pygame.draw.circle(surface, BACKGROUND_COLOR, point, 2)
 
 
-def draw_area_tiles(surface: pygame.Surface, tile_centers: Sequence[Point]) -> None:
+def draw_area_tiles(
+    surface: pygame.Surface, tile_centers: Sequence[Point], fill_ratio: float
+) -> None:
     if not tile_centers:
         return
     tile_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    total_tiles = len(tile_centers)
+    clamped = max(0.0, min(1.0, fill_ratio))
+    eased = ease_in_out_sine(clamped)
+    fill_value = eased * total_tiles
+    filled = int(fill_value)
+    partial = fill_value - filled
     for idx, (sx, sy) in enumerate(tile_centers):
         rect = pygame.Rect(0, 0, TILE_SIZE, TILE_SIZE)
         rect.center = (sx, sy)
-        color = TILE_COLOR_BASE if idx % 2 == 0 else TILE_COLOR_ALT
+        base_color = TILE_COLOR_BASE if idx % 2 == 0 else TILE_COLOR_ALT
+        color = base_color
+        if idx < filled:
+            color = TILE_COLOR_PROGRESS
+        elif idx == filled and partial > 0:
+            alpha = int(TILE_COLOR_PROGRESS[3] * partial)
+            color = TILE_COLOR_PROGRESS[:3] + (alpha,)
         pygame.draw.rect(tile_surface, color, rect, border_radius=6)
     surface.blit(tile_surface, (0, 0))
 
 
-def draw_edge_vector(surface: pygame.Surface, detail: EdgeDetail) -> None:
+def draw_edge_vector(surface: pygame.Surface, detail: EdgeDetail, pulse: float) -> None:
     mid_screen = plane_to_screen(detail.midpoint)
     vx, vy = detail.field
-    scale = SCALE * 0.7
+    pulse = max(0.0, min(1.0, pulse))
+    scale = SCALE * (0.6 + 0.25 * math.sin(math.pi * pulse))
     end = (mid_screen[0] + vx * scale, mid_screen[1] - vy * scale)
     pygame.draw.line(surface, EDGE_VECTOR_COLOR, mid_screen, end, 4)
     draw_arrow_head(surface, end, (vx * scale, -vy * scale), EDGE_VECTOR_HEAD)
@@ -274,6 +332,66 @@ def draw_orientation_label(surface: pygame.Surface, font: pygame.font.Font, poin
     color = (140, 220, 150) if area >= 0 else (255, 140, 140)
     label = font.render(text, True, color)
     surface.blit(label, (cx - label.get_width() / 2, cy - label.get_height() / 2))
+
+
+def render_story_caption(
+    surface: pygame.Surface,
+    fonts: FontBundle,
+    closed: bool,
+    points: Sequence[Point],
+    snapshot: Optional[IntegralSnapshot],
+    highlight_index: Optional[int],
+    edge_progress: float,
+    line_fraction: float,
+) -> None:
+    caption_surface = pygame.Surface((WIDTH, 120), pygame.SRCALPHA)
+    y = 20
+    pulse_target: Optional[Point] = None
+    pulse_radius = 0
+
+    def center_text(text: str, font: pygame.font.Font, color: Tuple[int, int, int]) -> None:
+        nonlocal y
+        rendered = font.render(text, True, color)
+        caption_surface.blit(
+            rendered, ((WIDTH - rendered.get_width()) / 2, y)
+        )
+        y += font.get_linesize() + 6
+
+    if not closed:
+        if len(points) < 2:
+            center_text("Sketch a boundary to trap some area.", fonts.large, TEXT_ACCENT)
+        elif len(points) == 2:
+            center_text("Add one more vertex, then close the loop.", fonts.large, TEXT_ACCENT)
+        else:
+            center_text("Click the first point (or right click) to seal the curve.", fonts.large, TEXT_ACCENT)
+    elif snapshot is None:
+        center_text("Position the vertices to avoid self-intersections.", fonts.large, TEXT_ACCENT)
+    else:
+        line_percent = int(line_fraction * 100)
+        if highlight_index is None or highlight_index >= len(snapshot.details):
+            center_text("Full circulation measured! Tiles now mirror the area integral.", fonts.large, TEXT_ACCENT)
+        else:
+            detail = snapshot.details[highlight_index]
+            orientation_text = "counter-clockwise" if snapshot.area >= 0 else "clockwise"
+            center_text(
+                f"Walking edge {highlight_index + 1} {orientation_text}: F(mid) · Δr builds circulation…",
+                fonts.large,
+                TEXT_ACCENT,
+            )
+            center_text(
+                f"Progress: {line_percent}% of ∬ curl(F) dA matched by ∮ F · dr",
+                fonts.regular,
+                (200, 220, 255),
+            )
+
+            mid_screen = plane_to_screen(detail.midpoint)
+            pulse = 12 + 8 * math.sin(edge_progress * math.pi)
+            pulse_target = mid_screen
+            pulse_radius = int(pulse)
+
+    surface.blit(caption_surface, (0, 0))
+    if pulse_target:
+        pygame.draw.circle(surface, EDGE_PROGRESS_HEAD, pulse_target, pulse_radius, 2)
 
 
 def nearest_point(points: Sequence[Point], target: Point) -> Optional[int]:
@@ -314,6 +432,22 @@ def compute_snapshot(points: Sequence[Point]) -> Optional[IntegralSnapshot]:
 
     return IntegralSnapshot(area, line_value, double_integral, details, cumulative, tile_centers, tile_area)
 
+
+def normalized_circulation(
+    snapshot: Optional[IntegralSnapshot], highlight_index: Optional[int], edge_progress: float
+) -> float:
+    if snapshot is None or not snapshot.details:
+        return 0.0
+    total = snapshot.double_integral if snapshot.double_integral != 0 else snapshot.line_value
+    if total == 0:
+        return 0.0
+    if highlight_index is None or highlight_index >= len(snapshot.details):
+        return 1.0
+    completed = snapshot.cumulative[highlight_index - 1] if highlight_index > 0 else 0.0
+    contribution = snapshot.details[highlight_index].contribution * max(0.0, min(1.0, edge_progress))
+    partial = completed + contribution
+    return max(0.0, min(1.0, abs(partial) / max(abs(total), 1e-6)))
+
 def render_overlay(
     surface: pygame.Surface,
     fonts: FontBundle,
@@ -323,6 +457,7 @@ def render_overlay(
     snapshot: Optional[IntegralSnapshot],
     highlight_index: Optional[int],
     active_edges: int,
+    line_fraction: float,
 ) -> None:
     overlay_width = 430
     panel = pygame.Surface((overlay_width, HEIGHT), pygame.SRCALPHA)
@@ -372,6 +507,24 @@ def render_overlay(
     panel.blit(fonts.small.render("Line integral", True, (40, 40, 40)), (bar_x + 6, bar_y + 2))
     panel.blit(fonts.small.render("Area / curl integral", True, (40, 40, 40)), (bar_x + 6, bar_y + 16))
     y += 48
+
+    progress_width = bar_width
+    progress_rect = pygame.Rect(bar_x, y, progress_width, 16)
+    pygame.draw.rect(panel, (40, 60, 40), progress_rect, border_radius=6)
+    fill = int(progress_width * max(0.0, min(1.0, line_fraction)))
+    pygame.draw.rect(
+        panel,
+        (150, 240, 200),
+        pygame.Rect(bar_x, y, fill, 16),
+        border_radius=6,
+    )
+    panel.blit(
+        fonts.small.render(
+            f"Walking progress: {int(line_fraction * 100):3d}%", True, (30, 30, 30)
+        ),
+        (bar_x + 6, y - 2),
+    )
+    y += 32
 
     write("Why they agree (drag to feel it):", fonts.regular, TEXT_ACCENT, spacing=8)
     write("1. Walk C edge by edge.", fonts.small)
@@ -503,26 +656,46 @@ def main() -> None:
             animator.reset()
             highlight_index: Optional[int] = None
             active_edges = 0
+            edge_progress = 0.0
         else:
-            highlight_index, active_edges = animator.step(dt, len(snapshot.details))
+            highlight_index, active_edges, edge_progress, _ = animator.step(
+                dt, len(snapshot.details)
+            )
 
         screen.fill(BACKGROUND_COLOR)
         draw_axes(screen)
         if toggles.show_field:
             draw_vector_field(screen)
 
-        if snapshot and toggles.show_tiles:
-            draw_area_tiles(screen, snapshot.tile_centers)
+        if snapshot:
+            line_fraction = normalized_circulation(snapshot, highlight_index, edge_progress)
+        else:
+            line_fraction = 0.0
 
-        draw_polygon(screen, points, closed, highlight_index)
+        if snapshot and toggles.show_tiles:
+            draw_area_tiles(screen, snapshot.tile_centers, line_fraction)
+
+        draw_polygon(screen, points, closed, highlight_index, edge_progress if snapshot else 0.0)
 
         if snapshot:
             draw_orientation_label(screen, fonts.small, points, snapshot.area)
             if highlight_index is not None and 0 <= highlight_index < len(snapshot.details):
-                draw_edge_vector(screen, snapshot.details[highlight_index])
+                draw_edge_vector(screen, snapshot.details[highlight_index], edge_progress)
+
+        render_story_caption(screen, fonts, closed, points, snapshot, highlight_index, edge_progress, line_fraction)
 
         if toggles.show_hints:
-            render_overlay(screen, fonts, toggles, closed, points, snapshot, highlight_index, active_edges)
+            render_overlay(
+                screen,
+                fonts,
+                toggles,
+                closed,
+                points,
+                snapshot,
+                highlight_index,
+                active_edges,
+                line_fraction,
+            )
 
         pygame.display.flip()
 

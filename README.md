@@ -37,6 +37,8 @@ This repository now includes a pygame-based Green's theorem playground. Draw any
 ### Why it's intuitive now
 
 - A **step-by-step overlay** narrates Green's theorem: it highlights the current edge, shows the vector field sample, the \(\Delta r\) displacement, and the running circulation so you can literally watch the sum build.
-- The region fills with **animated area tiles** whose total approximates the double integral (curl = 1). Each tile is a tangible \(\Delta A\) contribution, making the right-hand side feel like counting area.
+- A **story caption strip** across the top keeps the explanation conversational, pulsing the active midpoint so your eyes know exactly where the action is.
+- The highlight glides with **ease-in/ease-out motion**, leaving a glowing trace and breathing vector arrow so the circulation accumulation feels fluid instead of jumpy.
+- The region fills with **animated area tiles** whose total approximates the double integral (curl = 1). Each tile is a tangible \(\Delta A\) contribution, making the right-hand side feel like counting area, and they now fill in sync with the boundary walk progress bar.
 - A persistent **equality spotlight** displays both integrals side-by-side with a difference meter so the numerical agreement is obvious.
-- Extra hints call out orientation, controls, and how to experiment—drag vertices or toggle tiles/field to see the theorem hold from every angle.
+- Extra hints call out orientation, controls, and how to experiment—drag vertices or toggle tiles/field to see the theorem hold from every angle, while the new progress bar quantifies how much of the circulation equals the filled-in area so far.
