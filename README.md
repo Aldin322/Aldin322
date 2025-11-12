@@ -34,4 +34,5 @@ This repository now includes a pygame-based Green's theorem playground. Draw any
 - Press **G** to toggle the underlying vector field, **H** to toggle the information overlay, and **R** to start from scratch.
 - Press **Esc** to exit.
 
-The line integral, double integral (area), and their difference are displayed in real time to demonstrate Green's theorem in action.
+The overlay now walks through the Green's theorem formula, explicitly substituting \(P\), \(Q\), and the curl, and breaks the
+line integral into the per-edge dot products that approximate the circulation so you can see the equality emerge numerically.

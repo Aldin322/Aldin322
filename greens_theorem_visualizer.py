@@ -67,17 +67,27 @@ def polygon_area(points: Sequence[Vector]) -> float:
     return 0.5 * area
 
 
-def line_integral(points: Sequence[Vector]) -> float:
-    """Midpoint approximation of the line integral of F · dr."""
+def line_integral(points: Sequence[Vector]) -> Tuple[float, List[Tuple[Vector, Vector, Vector, float]]]:
+    """Midpoint approximation of the line integral of F · dr.
+
+    Returns both the integral and per-segment diagnostic details to render the
+    discrete sum that approximates the line integral.
+    """
     if len(points) < 2:
-        return 0.0
+        return 0.0, []
+
     total = 0.0
+    details: List[Tuple[Vector, Vector, Vector, float]] = []
     for i, (x1, y1) in enumerate(points):
         x2, y2 = points[(i + 1) % len(points)]
+        delta = (x2 - x1, y2 - y1)
         mid = ((x1 + x2) / 2, (y1 + y2) / 2)
         fx, fy = vector_field(mid)
-        total += fx * (x2 - x1) + fy * (y2 - y1)
-    return total
+        contribution = fx * delta[0] + fy * delta[1]
+        total += contribution
+        details.append((mid, delta, (fx, fy), contribution))
+
+    return total, details
 
 
 def lerp(a: Vector, b: Vector, t: float) -> Vector:
@@ -146,14 +156,14 @@ def draw_polygon(surface: pygame.Surface, points: Sequence[Point], closed: bool)
         pygame.draw.circle(surface, BACKGROUND_COLOR, point, 2)
 
 
-def compute_values(points: Sequence[Point], closed: bool) -> Tuple[float, float, float]:
+def compute_values(points: Sequence[Point], closed: bool) -> Tuple[float, float, float, List[Tuple[Vector, Vector, Vector, float]]]:
     if len(points) < 3 or not closed:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, []
     plane_points = [screen_to_plane(p) for p in points]
     area = polygon_area(plane_points)
-    line_value = line_integral(plane_points)
+    line_value, details = line_integral(plane_points)
     double_integral = area  # curl(F) = 1 everywhere
-    return area, line_value, double_integral
+    return area, line_value, double_integral, details
 
 
 def nearest_point(points: Sequence[Point], target: Point) -> int | None:
@@ -163,8 +173,16 @@ def nearest_point(points: Sequence[Point], target: Point) -> int | None:
     return None
 
 
-def render_text(surface: pygame.Surface, font: pygame.font.Font, closed: bool, area: float,
-                line_value: float, double_integral: float, points: Sequence[Point]) -> None:
+def render_text(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    closed: bool,
+    area: float,
+    line_value: float,
+    double_integral: float,
+    points: Sequence[Point],
+    details: Sequence[Tuple[Vector, Vector, Vector, float]],
+) -> None:
     lines: List[str] = [
         "Green's Theorem Visualizer",
         "Left click: add vertex / drag vertex",
@@ -179,10 +197,27 @@ def render_text(surface: pygame.Surface, font: pygame.font.Font, closed: bool, a
     if closed and len(points) >= 3:
         orientation = "counter-clockwise" if area > 0 else "clockwise"
         lines.extend([
-            f"Signed area (double integral of curl): {double_integral:.4f}",
-            f"Line integral of F · dr:              {line_value:.4f}",
+            "Green's theorem states:",
+            "    ∮₍C₎ (P dx + Q dy) = ∬₍R₎ (∂Q/∂x − ∂P/∂y) dA",
+            "For F(x, y) = (P, Q) = (-y/2, x/2):",
+            "    P = -y/2,  Q = x/2",
+            "    ∂Q/∂x = 1/2,  ∂P/∂y = -1/2 ⇒ curl = 1",
+            "    ∬₍R₎ 1 dA = area(R)",
+            f"Signed area (double integral): {double_integral:.4f}",
+            f"Line integral of F · dr:     {line_value:.4f}",
             f"Orientation: {orientation}  (difference = {line_value - double_integral:+.4e})",
+            "Line integral as a Riemann sum over edges:",
         ])
+
+        for idx, (mid, delta, field, contribution) in enumerate(details[:5]):
+            px, py = field
+            dx, dy = delta
+            lines.append(
+                f"  Edge {idx + 1}: (P,Q)({mid[0]:+.2f},{mid[1]:+.2f}) · (Δx,Δy)={dx:+.2f},{dy:+.2f} → {contribution:+.4f}"
+            )
+        if len(details) > 5:
+            lines.append("  … (remaining edges omitted for brevity)")
+
         lines.append("Drag vertices to deform the region and watch the equality persist!")
     else:
         lines.append("Green's theorem relates the line integral around the closed curve")
@@ -254,9 +289,9 @@ def main() -> None:
             draw_vector_field(screen)
 
         draw_polygon(screen, points, closed)
-        area, line_value, double_integral = compute_values(points, closed)
+        area, line_value, double_integral, details = compute_values(points, closed)
         if toggles.show_hints:
-            render_text(screen, font, closed, area, line_value, double_integral, points)
+            render_text(screen, font, closed, area, line_value, double_integral, points, details)
 
         pygame.display.flip()
         clock.tick(60)
