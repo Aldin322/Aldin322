@@ -31,8 +31,12 @@ This repository now includes a pygame-based Green's theorem playground. Draw any
 
 - **Left click** to drop vertices. Right click (or left-click near the first vertex) to close the polygon.
 - Once the curve is closed, **drag vertices** with the left mouse button to reshape it.
-- Press **G** to toggle the underlying vector field, **H** to toggle the information overlay, and **R** to start from scratch.
+- Press **G** to toggle the underlying vector field, **H** to toggle the information overlay, **T** to toggle the area tiles, and **R** to start from scratch.
 - Press **Esc** to exit.
 
-The overlay now walks through the Green's theorem formula, explicitly substituting \(P\), \(Q\), and the curl, and breaks the
-line integral into the per-edge dot products that approximate the circulation so you can see the equality emerge numerically.
+### Why it's intuitive now
+
+- A **step-by-step overlay** narrates Green's theorem: it highlights the current edge, shows the vector field sample, the \(\Delta r\) displacement, and the running circulation so you can literally watch the sum build.
+- The region fills with **animated area tiles** whose total approximates the double integral (curl = 1). Each tile is a tangible \(\Delta A\) contribution, making the right-hand side feel like counting area.
+- A persistent **equality spotlight** displays both integrals side-by-side with a difference meter so the numerical agreement is obvious.
+- Extra hints call out orientation, controls, and how to experiment—drag vertices or toggle tiles/field to see the theorem hold from every angle.

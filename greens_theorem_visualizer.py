@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pygame
 
@@ -14,24 +14,106 @@ WIDTH, HEIGHT = 960, 720
 BACKGROUND_COLOR = (18, 18, 24)
 AXIS_COLOR = (70, 70, 90)
 AXIS_HIGHLIGHT = (120, 120, 160)
-POLYGON_COLOR = (46, 150, 255, 80)
+POLYGON_COLOR = (46, 150, 255, 70)
 POLYGON_BORDER = (90, 190, 255)
 POINT_COLOR = (255, 230, 120)
 POINT_SELECTED = (255, 120, 120)
 TEXT_COLOR = (230, 230, 240)
+TEXT_ACCENT = (180, 240, 200)
 FIELD_COLOR = (120, 120, 220)
 FIELD_ARROW_HEAD = (190, 190, 255)
 SEGMENT_COLOR = (140, 220, 150)
 SEGMENT_ARROW = (90, 180, 110)
+SEGMENT_HIGHLIGHT = (255, 200, 120)
+SEGMENT_HIGHLIGHT_ARROW = (255, 160, 80)
+EDGE_VECTOR_COLOR = (255, 120, 120)
+EDGE_VECTOR_HEAD = (255, 190, 140)
+TILE_COLOR_BASE = (80, 200, 180, 90)
+TILE_COLOR_ALT = (60, 170, 150, 120)
+PANEL_COLOR = (15, 15, 24, 230)
+PANEL_BORDER = (110, 110, 150)
 
 SCALE = 80  # pixels per plane unit
 ARROW_SCALE = 40
 GRID_SPACING = 60
+TILE_SPACING = 42
+TILE_SIZE = TILE_SPACING - 6
 CLOSE_DISTANCE = 18
 DRAG_DISTANCE = 18
 
 Vector = Tuple[float, float]
 Point = Tuple[float, float]
+
+
+@dataclass
+class EdgeDetail:
+    """Diagnostic information for a single polygon edge."""
+
+    midpoint: Vector
+    delta: Vector
+    field: Vector
+    contribution: float
+
+
+@dataclass
+class IntegralSnapshot:
+    """Full set of quantities used to visualise Green's theorem."""
+
+    area: float
+    line_value: float
+    double_integral: float
+    details: List[EdgeDetail]
+    cumulative: List[float]
+    tile_centers: List[Point]
+    tile_area: float
+
+    @property
+    def approximate_area(self) -> float:
+        return self.tile_area * len(self.tile_centers)
+
+
+@dataclass
+class ToggleState:
+    show_field: bool = True
+    show_hints: bool = True
+    show_tiles: bool = True
+
+
+@dataclass
+class SnapshotCache:
+    snapshot: Optional[IntegralSnapshot] = None
+    dirty: bool = True
+
+    def invalidate(self) -> None:
+        self.dirty = True
+
+
+@dataclass
+class EdgeAnimator:
+    time: float = 0.0
+    dwell: float = 1.1  # seconds spent on each edge
+
+    def reset(self) -> None:
+        self.time = 0.0
+
+    def step(self, dt: float, count: int) -> Tuple[Optional[int], int]:
+        if count <= 0:
+            self.reset()
+            return None, 0
+        total_duration = self.dwell * count
+        self.time = (self.time + dt) % total_duration
+        raw = self.time / self.dwell
+        index = int(raw)
+        index = min(index, count - 1)
+        active = index + 1
+        return index, active
+
+
+@dataclass
+class FontBundle:
+    regular: pygame.font.Font
+    small: pygame.font.Font
+    large: pygame.font.Font
 
 
 def screen_to_plane(point: Point) -> Vector:
@@ -67,17 +149,13 @@ def polygon_area(points: Sequence[Vector]) -> float:
     return 0.5 * area
 
 
-def line_integral(points: Sequence[Vector]) -> Tuple[float, List[Tuple[Vector, Vector, Vector, float]]]:
-    """Midpoint approximation of the line integral of F · dr.
-
-    Returns both the integral and per-segment diagnostic details to render the
-    discrete sum that approximates the line integral.
-    """
+def line_integral(points: Sequence[Vector]) -> Tuple[float, List[EdgeDetail]]:
+    """Midpoint approximation of the line integral of F · dr with diagnostics."""
     if len(points) < 2:
         return 0.0, []
 
     total = 0.0
-    details: List[Tuple[Vector, Vector, Vector, float]] = []
+    details: List[EdgeDetail] = []
     for i, (x1, y1) in enumerate(points):
         x2, y2 = points[(i + 1) % len(points)]
         delta = (x2 - x1, y2 - y1)
@@ -85,7 +163,7 @@ def line_integral(points: Sequence[Vector]) -> Tuple[float, List[Tuple[Vector, V
         fx, fy = vector_field(mid)
         contribution = fx * delta[0] + fy * delta[1]
         total += contribution
-        details.append((mid, delta, (fx, fy), contribution))
+        details.append(EdgeDetail(mid, delta, (fx, fy), contribution))
 
     return total, details
 
@@ -129,7 +207,12 @@ def draw_arrow_head(surface: pygame.Surface, tip: Point, direction: Vector, colo
     pygame.draw.polygon(surface, color, [tip, left, right])
 
 
-def draw_polygon(surface: pygame.Surface, points: Sequence[Point], closed: bool) -> None:
+def draw_polygon(
+    surface: pygame.Surface,
+    points: Sequence[Point],
+    closed: bool,
+    highlight_edge: Optional[int] = None,
+) -> None:
     if len(points) >= 3 and closed:
         polygon_points = [tuple(map(int, p)) for p in points]
         gfxdraw = getattr(pygame, "gfxdraw", None)
@@ -141,12 +224,16 @@ def draw_polygon(surface: pygame.Surface, points: Sequence[Point], closed: bool)
             pygame.draw.polygon(polygon_surface, POLYGON_COLOR, polygon_points)
             surface.blit(polygon_surface, (0, 0))
             pygame.draw.polygon(surface, POLYGON_BORDER, polygon_points, 2)
+
         for i, start in enumerate(points):
             end = points[(i + 1) % len(points)]
-            pygame.draw.line(surface, SEGMENT_COLOR, start, end, 3)
+            color = SEGMENT_HIGHLIGHT if i == highlight_edge else SEGMENT_COLOR
+            arrow_color = SEGMENT_HIGHLIGHT_ARROW if i == highlight_edge else SEGMENT_ARROW
+            width = 5 if i == highlight_edge else 3
+            pygame.draw.line(surface, color, start, end, width)
             place = lerp(start, end, 0.85)
             direction = (end[0] - start[0], end[1] - start[1])
-            draw_arrow_head(surface, place, direction, SEGMENT_ARROW)
+            draw_arrow_head(surface, place, direction, arrow_color)
     elif len(points) >= 2:
         pygame.draw.lines(surface, POLYGON_BORDER, False, points, 2)
 
@@ -156,84 +243,184 @@ def draw_polygon(surface: pygame.Surface, points: Sequence[Point], closed: bool)
         pygame.draw.circle(surface, BACKGROUND_COLOR, point, 2)
 
 
-def compute_values(points: Sequence[Point], closed: bool) -> Tuple[float, float, float, List[Tuple[Vector, Vector, Vector, float]]]:
-    if len(points) < 3 or not closed:
-        return 0.0, 0.0, 0.0, []
-    plane_points = [screen_to_plane(p) for p in points]
-    area = polygon_area(plane_points)
-    line_value, details = line_integral(plane_points)
-    double_integral = area  # curl(F) = 1 everywhere
-    return area, line_value, double_integral, details
+def draw_area_tiles(surface: pygame.Surface, tile_centers: Sequence[Point]) -> None:
+    if not tile_centers:
+        return
+    tile_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    for idx, (sx, sy) in enumerate(tile_centers):
+        rect = pygame.Rect(0, 0, TILE_SIZE, TILE_SIZE)
+        rect.center = (sx, sy)
+        color = TILE_COLOR_BASE if idx % 2 == 0 else TILE_COLOR_ALT
+        pygame.draw.rect(tile_surface, color, rect, border_radius=6)
+    surface.blit(tile_surface, (0, 0))
 
 
-def nearest_point(points: Sequence[Point], target: Point) -> int | None:
+def draw_edge_vector(surface: pygame.Surface, detail: EdgeDetail) -> None:
+    mid_screen = plane_to_screen(detail.midpoint)
+    vx, vy = detail.field
+    scale = SCALE * 0.7
+    end = (mid_screen[0] + vx * scale, mid_screen[1] - vy * scale)
+    pygame.draw.line(surface, EDGE_VECTOR_COLOR, mid_screen, end, 4)
+    draw_arrow_head(surface, end, (vx * scale, -vy * scale), EDGE_VECTOR_HEAD)
+    pygame.draw.circle(surface, EDGE_VECTOR_COLOR, mid_screen, 6)
+
+
+def draw_orientation_label(surface: pygame.Surface, font: pygame.font.Font, points: Sequence[Point], area: float) -> None:
+    if not points:
+        return
+    cx = sum(p[0] for p in points) / len(points)
+    cy = sum(p[1] for p in points) / len(points)
+    text = "CCW (+)" if area >= 0 else "CW (−)"
+    color = (140, 220, 150) if area >= 0 else (255, 140, 140)
+    label = font.render(text, True, color)
+    surface.blit(label, (cx - label.get_width() / 2, cy - label.get_height() / 2))
+
+
+def nearest_point(points: Sequence[Point], target: Point) -> Optional[int]:
     for idx, point in enumerate(points):
         if math.dist(point, target) <= DRAG_DISTANCE:
             return idx
     return None
 
 
-def render_text(
+def generate_tile_centers(points: Sequence[Point]) -> List[Point]:
+    mask_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    pygame.draw.polygon(mask_surface, (255, 255, 255, 255), points)
+    mask = pygame.mask.from_surface(mask_surface)
+    centers: List[Point] = []
+    for sx in range(TILE_SPACING // 2, WIDTH, TILE_SPACING):
+        for sy in range(TILE_SPACING // 2, HEIGHT, TILE_SPACING):
+            if mask.get_at((sx, sy)):
+                centers.append((sx, sy))
+    return centers
+
+
+def compute_snapshot(points: Sequence[Point]) -> Optional[IntegralSnapshot]:
+    if len(points) < 3:
+        return None
+    plane_points = [screen_to_plane(p) for p in points]
+    area = polygon_area(plane_points)
+    line_value, details = line_integral(plane_points)
+    double_integral = area  # curl(F) = 1 everywhere
+
+    cumulative: List[float] = []
+    running = 0.0
+    for detail in details:
+        running += detail.contribution
+        cumulative.append(running)
+
+    tile_centers = generate_tile_centers(points)
+    tile_area = (TILE_SPACING / SCALE) ** 2
+
+    return IntegralSnapshot(area, line_value, double_integral, details, cumulative, tile_centers, tile_area)
+
+def render_overlay(
     surface: pygame.Surface,
-    font: pygame.font.Font,
+    fonts: FontBundle,
+    toggles: ToggleState,
     closed: bool,
-    area: float,
-    line_value: float,
-    double_integral: float,
     points: Sequence[Point],
-    details: Sequence[Tuple[Vector, Vector, Vector, float]],
+    snapshot: Optional[IntegralSnapshot],
+    highlight_index: Optional[int],
+    active_edges: int,
 ) -> None:
-    lines: List[str] = [
-        "Green's Theorem Visualizer",
-        "Left click: add vertex / drag vertex",
-        "Right click: close polygon",
-        "R: reset   H: toggle hints   G: toggle vector field",
-    ]
-    if len(points) >= 3 and not closed:
-        lines.append("Close the loop to compute the integrals (click near the first vertex).")
-    elif len(points) < 3:
-        lines.append("Add at least three vertices to form a region.")
+    overlay_width = 430
+    panel = pygame.Surface((overlay_width, HEIGHT), pygame.SRCALPHA)
+    pygame.draw.rect(panel, PANEL_COLOR, panel.get_rect(), border_radius=18)
 
-    if closed and len(points) >= 3:
-        orientation = "counter-clockwise" if area > 0 else "clockwise"
-        lines.extend([
-            "Green's theorem states:",
-            "    ∮₍C₎ (P dx + Q dy) = ∬₍R₎ (∂Q/∂x − ∂P/∂y) dA",
-            "For F(x, y) = (P, Q) = (-y/2, x/2):",
-            "    P = -y/2,  Q = x/2",
-            "    ∂Q/∂x = 1/2,  ∂P/∂y = -1/2 ⇒ curl = 1",
-            "    ∬₍R₎ 1 dA = area(R)",
-            f"Signed area (double integral): {double_integral:.4f}",
-            f"Line integral of F · dr:     {line_value:.4f}",
-            f"Orientation: {orientation}  (difference = {line_value - double_integral:+.4e})",
-            "Line integral as a Riemann sum over edges:",
-        ])
+    y = 20
 
-        for idx, (mid, delta, field, contribution) in enumerate(details[:5]):
-            px, py = field
-            dx, dy = delta
-            lines.append(
-                f"  Edge {idx + 1}: (P,Q)({mid[0]:+.2f},{mid[1]:+.2f}) · (Δx,Δy)={dx:+.2f},{dy:+.2f} → {contribution:+.4f}"
-            )
-        if len(details) > 5:
-            lines.append("  … (remaining edges omitted for brevity)")
+    def write(text: str, font: pygame.font.Font = fonts.regular, color: Tuple[int, int, int] = TEXT_COLOR, spacing: int = 6) -> None:
+        nonlocal y
+        panel.blit(font.render(text, True, color), (24, y))
+        y += font.get_linesize() + spacing
 
-        lines.append("Drag vertices to deform the region and watch the equality persist!")
-    else:
-        lines.append("Green's theorem relates the line integral around the closed curve")
-        lines.append("to the double integral of the curl inside the region.")
+    write("Green's Theorem Visualizer", fonts.large, TEXT_ACCENT, spacing=10)
+    write("Controls:", fonts.small, TEXT_ACCENT, spacing=2)
+    write("  LMB add / drag vertices", fonts.small)
+    write("  Close loop: right click or click start", fonts.small)
+    write("  R reset   G field   H overlay   T tiles", fonts.small, spacing=12)
 
-    padding = 12
-    y = padding
-    for line in lines:
-        surface.blit(font.render(line, True, TEXT_COLOR), (padding, y))
-        y += font.get_linesize() + 2
+    if not closed or snapshot is None:
+        if len(points) < 3:
+            write("Sketch a closed loop to enclose a region.", fonts.regular)
+            write("Add ≥3 vertices, then click near the first one to seal it.", fonts.small)
+        else:
+            write("Seal the loop to compare the integrals.", fonts.regular)
+        surface.blit(panel, (0, 0))
+        return
 
+    orientation = "counter-clockwise" if snapshot.area >= 0 else "clockwise"
+    sign_text = "positive" if snapshot.area >= 0 else "negative"
+    write(f"Orientation: {orientation} ({sign_text})", fonts.small, TEXT_ACCENT, spacing=12)
 
-@dataclass
-class ToggleState:
-    show_field: bool = True
-    show_hints: bool = True
+    write("Equality spotlight", fonts.regular, TEXT_ACCENT, spacing=2)
+    write(f"∮₍C₎ F · dr = {snapshot.line_value:+.4f}", fonts.regular)
+    write(f"⊕ ∬₍R₎ curl(F) dA = {snapshot.double_integral:+.4f}", fonts.regular)
+    difference = snapshot.line_value - snapshot.double_integral
+    write(f"Difference = {difference:+.4e}", fonts.small, (200, 200, 220), spacing=12)
+
+    bar_width = overlay_width - 80
+    bar_x = 40
+    bar_y = y
+    scale = max(abs(snapshot.line_value), abs(snapshot.double_integral), 1.0)
+    line_len = int(bar_width * abs(snapshot.line_value) / scale)
+    area_len = int(bar_width * abs(snapshot.double_integral) / scale)
+    pygame.draw.rect(panel, (35, 50, 35), pygame.Rect(bar_x, bar_y, bar_width, 32), border_radius=8)
+    pygame.draw.rect(panel, (80, 200, 160), pygame.Rect(bar_x, bar_y + 4, line_len, 10), border_radius=4)
+    pygame.draw.rect(panel, (120, 150, 240), pygame.Rect(bar_x, bar_y + 18, area_len, 10), border_radius=4)
+    panel.blit(fonts.small.render("Line integral", True, (40, 40, 40)), (bar_x + 6, bar_y + 2))
+    panel.blit(fonts.small.render("Area / curl integral", True, (40, 40, 40)), (bar_x + 6, bar_y + 16))
+    y += 48
+
+    write("Why they agree (drag to feel it):", fonts.regular, TEXT_ACCENT, spacing=8)
+    write("1. Walk C edge by edge.", fonts.small)
+    write("   Δr is the highlighted segment.", fonts.small, spacing=2)
+
+    if highlight_index is not None and snapshot.details:
+        detail = snapshot.details[highlight_index]
+        running = snapshot.cumulative[highlight_index]
+        fx, fy = detail.field
+        dx, dy = detail.delta
+        write(
+            f"   Edge {highlight_index + 1}: F(mid) = ({fx:+.2f}, {fy:+.2f})", fonts.small
+        )
+        write(f"   Δr = ({dx:+.2f}, {dy:+.2f}) → dot = {detail.contribution:+.4f}", fonts.small)
+        write(f"   Running circulation: {running:+.4f}", fonts.small, spacing=8)
+
+    max_lines = min(len(snapshot.details), 5)
+    for idx in range(max_lines):
+        detail = snapshot.details[idx]
+        symbol = "▶" if idx == highlight_index else ("✓" if idx < active_edges - 1 else "•")
+        panel.blit(
+            fonts.small.render(
+                f"   {symbol} Edge {idx + 1}: ({detail.field[0]:+.2f},{detail.field[1]:+.2f}) · ({detail.delta[0]:+.2f},{detail.delta[1]:+.2f}) = {detail.contribution:+.4f}",
+                True,
+                (210, 210, 230),
+            ),
+            (24, y),
+        )
+        y += fonts.small.get_linesize() + 2
+    if len(snapshot.details) > max_lines:
+        write("   … more edges continue the same accumulation", fonts.small)
+
+    write("2. Sum all dot products → circulation around C.", fonts.small, spacing=10)
+    write("3. Fill R with tiles; curl(F)=1 so each contributes ΔA.", fonts.small)
+    write(
+        f"   {len(snapshot.tile_centers)} tiles × {snapshot.tile_area:.3f} ≈ {snapshot.approximate_area:.4f}",
+        fonts.small,
+    )
+    write(
+        "   Their total matches the green circulation sum!",
+        fonts.small,
+        TEXT_ACCENT,
+        spacing=12,
+    )
+
+    if not toggles.show_tiles:
+        write("(Press T to re-enable the area tiles.)", fonts.small, (200, 160, 160))
+
+    surface.blit(panel, (0, 0))
 
 
 def main() -> None:
@@ -241,15 +428,22 @@ def main() -> None:
     pygame.display.set_caption("Green's Theorem Visualizer")
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas", 18)
+    fonts = FontBundle(
+        regular=pygame.font.SysFont("consolas", 18),
+        small=pygame.font.SysFont("consolas", 16),
+        large=pygame.font.SysFont("consolas", 24, bold=True),
+    )
 
     points: List[Point] = []
     closed = False
-    dragging: int | None = None
+    dragging: Optional[int] = None
     toggles = ToggleState()
+    cache = SnapshotCache()
+    animator = EdgeAnimator()
 
     running = True
     while running:
+        dt = clock.tick(60) / 1000.0
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -257,12 +451,17 @@ def main() -> None:
                 if event.key == pygame.K_r:
                     points.clear()
                     closed = False
+                    cache.invalidate()
                 elif event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_g:
                     toggles.show_field = not toggles.show_field
                 elif event.key == pygame.K_h:
                     toggles.show_hints = not toggles.show_hints
+                elif event.key == pygame.K_t:
+                    toggles.show_tiles = not toggles.show_tiles
+                elif event.key == pygame.K_SPACE and closed:
+                    animator.reset()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     if closed:
@@ -272,29 +471,60 @@ def main() -> None:
                     else:
                         if points and math.dist(points[0], event.pos) < CLOSE_DISTANCE and len(points) >= 3:
                             closed = True
+                            cache.invalidate()
                         else:
                             points.append(event.pos)
+                            cache.invalidate()
                 elif event.button == 3 and not closed and len(points) >= 3:
                     closed = True
+                    cache.invalidate()
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
                     dragging = None
             elif event.type == pygame.MOUSEMOTION:
                 if dragging is not None:
                     points[dragging] = event.pos
+                    cache.invalidate()
+
+        if not closed and cache.snapshot is not None:
+            cache.snapshot = None
+            cache.dirty = True
+
+        snapshot: Optional[IntegralSnapshot] = None
+        if closed and len(points) >= 3:
+            if cache.dirty or cache.snapshot is None:
+                cache.snapshot = compute_snapshot(points)
+                cache.dirty = False
+            snapshot = cache.snapshot
+        else:
+            snapshot = None
+
+        if not snapshot:
+            animator.reset()
+            highlight_index: Optional[int] = None
+            active_edges = 0
+        else:
+            highlight_index, active_edges = animator.step(dt, len(snapshot.details))
 
         screen.fill(BACKGROUND_COLOR)
         draw_axes(screen)
         if toggles.show_field:
             draw_vector_field(screen)
 
-        draw_polygon(screen, points, closed)
-        area, line_value, double_integral, details = compute_values(points, closed)
+        if snapshot and toggles.show_tiles:
+            draw_area_tiles(screen, snapshot.tile_centers)
+
+        draw_polygon(screen, points, closed, highlight_index)
+
+        if snapshot:
+            draw_orientation_label(screen, fonts.small, points, snapshot.area)
+            if highlight_index is not None and 0 <= highlight_index < len(snapshot.details):
+                draw_edge_vector(screen, snapshot.details[highlight_index])
+
         if toggles.show_hints:
-            render_text(screen, font, closed, area, line_value, double_integral, points, details)
+            render_overlay(screen, fonts, toggles, closed, points, snapshot, highlight_index, active_edges)
 
         pygame.display.flip()
-        clock.tick(60)
 
     pygame.quit()
 
